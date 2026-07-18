@@ -1,0 +1,359 @@
+# @zakkster/lite-i18n
+
+> Zero-GC reactive internationalization built on @zakkster/lite-signal. Compile
+> messages once at defineMessages -- runtime lookup is one Map.get and one fn
+> call, allocating nothing but the returned string. Synchronous reactive flush,
+> no microtask scheduler. ESM-only, ~3.1 KB min+gz core + ~0.6 KB Format entry,
+> single peer dep on @zakkster/lite-signal (^1.4.0), MIT licensed.
+
+The library exposes translation primitives (t, plural, locale, defineMessages),
+async loading (loadLocale, ready), fallback chain, missing-key policies, and a
+tree-shakeable Intl formatter surface (number, date, list, relative-time) with
+both convenience and factory forms. Built for animation loops, Twitch
+Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
+
+## Core concepts
+
+- **Message**: a template string. Three internal shapes: static (`"Welcome"`),
+  interpolation (`"Hi, {name}"`), or inline plural (`"{count, plural, one
+  {# item} other {# items}}"`). Compiled at defineMessages into a closure over
+  a stable token array.
+
+- **Dict**: a namespace. Values are strings, plural-object entries
+  (`{ one, other, =0, ... }`), or nested dicts. Nested dicts flatten to
+  dot-paths at define time so runtime lookup is a single Map.get.
+
+- **Plural-object entry**: an object with an `other` key and only CLDR
+  selectors (`zero`, `one`, `two`, `few`, `many`, `other`) or exact patterns
+  (`=0`, `=1`, ...) as own-property keys. Detected structurally at define
+  time. Missing `other` -> treated as nested dict.
+
+- **Inline plural**: the ICU-lite syntax `{var, plural, sel {sub} sel {sub}}`.
+  `#` inside a sub-template is shorthand for `{var}`. Balanced-brace parser
+  supports mixing literals, `{slot}`, and one plural block per template
+  (nested plurals not supported).
+
+- **Reactive signals**: each instance holds a `_locale` signal (current
+  locale) and a `_epoch` signal (bumped on defineMessages for active/fallback
+  locales, and on setFallback). `t()` and `plural()` subscribe to both, so
+  effects/computeds re-run on any change.
+
+- **Fallback chain**: array of locales walked in order when a key is missing
+  in the current locale. The active locale is skipped if listed. Chain flips
+  bump the epoch. Defining messages for a locale NOT in `[active, ...chain]`
+  does NOT bump the epoch (avoids spurious re-fires for lazy chunks belonging
+  to other locales).
+
+- **Missing-key policy**: `"key"` (default -- return literal), `"warn"`
+  (console.warn + return literal), `"throw"` (throw `MissingKeyError`).
+  Fallback chain walks BEFORE the policy fires. Optional `onMissingKey(key,
+  locale)` hook can short-circuit; return a string to use it, return void to
+  fall through.
+
+- **Async loader**: `loadLocale(loc, fn)` runs a user-supplied loader, caches
+  the dict, and flips `ready(loc)` signal to true. Race-safe: in-flight calls
+  share a promise; already-loaded resolves immediately without calling the
+  loader; errors clear the in-flight slot so callers can retry.
+
+- **Isolated instance**: `createI18n(config)` creates a fresh reactive world
+  with its own signals, dicts, and PluralRules cache. Multiple instances
+  share nothing. `setDefaultI18n(inst)` swaps the instance used by top-level
+  helpers; `locale` is an ESM live binding so importers see the new signal
+  on next reference (destructured captures are stale).
+
+- **Formatters** (`@zakkster/lite-i18n/format`): reactive wrappers around
+  `Intl.NumberFormat`, `Intl.DateTimeFormat`, `Intl.ListFormat`,
+  `Intl.RelativeTimeFormat`. Two shapes: convenience (`formatNumber(v, opts,
+  i18n?)`) with WeakMap(opts)-keyed cache; factory (`numberFormat(opts,
+  i18n?)`) returning a per-locale-cached `(value) => string`. Convenience is
+  zero-alloc for hoisted opts; factory is zero-alloc unconditionally after
+  the first call per locale.
+
+## Architecture invariants
+
+- **Compile once, reuse forever**: `defineMessages` walks the dict, flattens
+  nested paths, tokenizes each template, and compiles a closure per entry.
+  The closure signature is `(params, locale, getPluralRules) => string`.
+  Compiled entries stored in `Map<locale, Map<key, fn>>`.
+
+- **Uniform call site**: every compiled entry -- static, simple, plural-obj,
+  inline-plural -- has the same signature. Monomorphic invocation at the
+  lookup site is critical for V8 IC performance.
+
+- **Token types**: 0 = literal (`{ str }`), 1 = slot (`{ key }`), 2 = plural
+  block (`{ variable, exact: Map<number, tokens>, variants: Map<selector,
+  tokens> }`). Sub-templates inside plural variants use only types 0 and 1;
+  `#` compiles to `{ type: 1, key: <plural variable> }`.
+
+- **PluralRules cache**: `Map<locale, Intl.PluralRules>` per instance. Lazy;
+  one instance per unique locale used with a plural.
+
+- **32-bit modular epoch**: `_epoch` is bumped via `(n + 1) | 0`, wrapping
+  signed. lite-signal handles the modular comparison; the counter never
+  overflows.
+
+- **String allocation is the only per-call allocation**: the token loop
+  builds the result via `out += ...`. No intermediate arrays or objects. No
+  regex per call.
+
+- **Reactivity is synchronous**: `_epoch.set(v)` -> `t()` calls in dependent
+  effects flush in the same call stack. Same discipline as lite-signal.
+
+## Performance characteristics
+
+- `t()` with static template -- O(1), zero alloc (except the returned string).
+- `t()` with N slots -- O(N), zero alloc.
+- `t()` with inline plural -- O(N + P) where P is size of the winning variant.
+- `plural(key, count, params?)` -- one small merge alloc for `{...params,
+  count}`. For hot loops, use `t(key, params)` with `count` in `params`.
+- `formatNumber(v, opts)` (hoisted opts) -- one Map.get + Intl format call.
+- `numberFormat(opts)()` (factory) -- one Map.get + Intl format call. Same,
+  no WeakMap layer.
+- `defineMessages` -- O(entries * template length). Allocation-heavy; not on
+  hot path.
+- `setFallback` / `defineMessages` for active or fallback locale -- bump
+  epoch, O(observers). Standard signal cost.
+- `loadLocale` -- O(1) + Promise infrastructure (unavoidable). Not for hot
+  paths.
+
+## Version notes
+
+- **1.0.0** (initial). Core surface: signal (`locale`, `_epoch`, `ready`),
+  translation (`t`, `plural`), definition (`defineMessages`), async loading
+  (`loadLocale`, `ready`), fallback chain (`setFallback`), missing-key
+  policies (`setMissingKeyPolicy`, `onMissingKey`), instance isolation
+  (`createI18n`, `setDefaultI18n`, `getDefaultI18n`), diagnostics (`stats`),
+  errors (`MissingKeyError`). Format entry: four convenience formatters,
+  four factory formatters, `createFormatters(i18n)` bulk binder. 76 tests
+  (72 behavior + 4 zero-GC under --expose-gc), 0 failures. Retained heap
+  ceilings: 100k t() calls with interpolation < 200 KB; 100k inline plural
+  calls < 300 KB; 100k factory numberFormat calls < 100 KB; 1000 redefine
+  cycles < 500 KB.
+
+## When to use
+
+- Twitch Extensions with locale-configurable UIs.
+- Game HUDs, scoreboards, telemetry overlays with i18n.
+- Long-running browser sessions where every KB of transient garbage matters.
+- Multi-tenant SDKs where each tenant has its own locale + dict.
+- SSR (one instance per request via createI18n).
+- Anywhere `i18next` / `formatjs` bundle size or GC pressure is a problem.
+
+## When NOT to use
+
+- If you need full ICU MessageFormat with `select`, `selectordinal`, or
+  nested plurals -- use `@formatjs/intl-messageformat`.
+- If your translations require gender-marking or complex morphological
+  agreement -- CLDR plural rules and `select` don't cover this.
+- If you need translation-management-system integration (Crowdin, Lokalise,
+  Transifex import formats) at runtime -- do the format conversion at build
+  time and feed plain dicts.
+- If you don't want a peer dep on lite-signal -- the reactivity is the core
+  value proposition of this library.
+
+## API summary
+
+```ts
+// Core (@zakkster/lite-i18n)
+
+interface I18nConfig {
+    locale?:              string;
+    fallback?:            string | string[];
+    missingKeyPolicy?:    "key" | "warn" | "throw";
+    onMissingKey?:        (key: string, locale: string) => string | void;
+    messages?:            Record<string, MessageDict>;
+}
+
+interface I18n {
+    readonly locale: Signal<string>;
+    t(key: string, params?: MessageParams): string;
+    plural(key: string, count: number, params?: MessageParams): string;
+    defineMessages(locale: string, dict: MessageDict): void;
+    loadLocale(locale: string, loader: () => Promise<MessageDict>): Promise<void>;
+    ready(locale: string): Signal<boolean>;
+    setFallback(chain: string | string[]): void;
+    setMissingKeyPolicy(p: "key" | "warn" | "throw"): void;
+    onMissingKey(fn: ((key: string, locale: string) => string | void) | null): void;
+    stats(): I18nStats;
+}
+
+function createI18n(config?: I18nConfig): I18n;
+function setDefaultI18n(inst: I18n): void;
+function getDefaultI18n(): I18n;
+
+// Top-level helpers (default instance)
+let locale: Signal<string>;               // ESM live binding
+function t(key: string, params?: MessageParams): string;
+function plural(key: string, count: number, params?: MessageParams): string;
+function defineMessages(locale: string, dict: MessageDict): void;
+function loadLocale(locale: string, loader: () => Promise<MessageDict>): Promise<void>;
+function ready(locale: string): Signal<boolean>;
+function setFallback(chain: string | string[]): void;
+function setMissingKeyPolicy(p: "key" | "warn" | "throw"): void;
+function onMissingKey(fn: ((key: string, locale: string) => string | void) | null): void;
+function stats(): I18nStats;
+
+class MissingKeyError extends Error {
+    key: string;
+    locale: string;
+}
+
+// Format (@zakkster/lite-i18n/format)
+
+// Convenience (WeakMap(opts) -> Map<locale, Intl> cache; hoist opts for zero-alloc)
+function formatNumber      (v: number|bigint, opts?, i18n?): string;
+function formatDate        (v: Date|number,   opts?, i18n?): string;
+function formatList        (items,             opts?, i18n?): string;
+function formatRelativeTime(v: number, unit,   opts?, i18n?): string;
+
+// Factory (per-locale cache local to the returned fn; unconditional zero-alloc steady state)
+function numberFormat      (opts?, i18n?): (v: number|bigint) => string;
+function dateFormat        (opts?, i18n?): (v: Date|number)   => string;
+function listFormat        (opts?, i18n?): (items)             => string;
+function relativeTimeFormat(opts?, i18n?): (v: number, unit)   => string;
+
+function createFormatters(i18n: I18n): BoundFormatters;  // all 8 bound to instance
+```
+
+## Message template DSL
+
+```
+Template            := (Literal | Slot | PluralBlock | Quoted)*
+Literal             := any character except '{' or "'"; # is literal here (not a slot)
+Slot                := '{' Identifier '}'
+PluralBlock         := '{' Identifier ',' 'plural' ',' Variant+ '}'
+Variant             := Selector '{' SubTemplate '}'
+Selector            := CldrSelector | '=' Digits
+CldrSelector        := 'zero' | 'one' | 'two' | 'few' | 'many' | 'other'
+SubTemplate         := (SubLiteral | Slot | Hash | Quoted)*
+SubLiteral          := any character except '{', '#', or "'"
+Hash                := '#'   ; equivalent to '{' <plural variable> '}'
+Quoted              := "'" QuotedContent "'"
+                       ; Only opens when the "'" is followed by '{' '}' or '#'
+                       ; Inside the section, '' is a literal apostrophe.
+                       ; Outside a section, '' is also a literal apostrophe.
+                       ; A "'" not followed by a special char is literal.
+Identifier          := [a-zA-Z_][a-zA-Z0-9_]*
+```
+
+Constraints enforced at compile time:
+- Every plural block must contain an `other` variant. Missing -> `SyntaxError`.
+- Braces must balance (respecting quoted sections). Unmatched `{` -> `SyntaxError`.
+- One plural block per template; nested plurals not supported.
+- Slot keys are bare identifiers. A slot with a comma inside (`{n, number}`,
+  `{d, date, short}`, `{g, select, ...}`) is any unsupported ICU shape and
+  throws `SyntaxError` at define time -- previously these rendered silently
+  as `""`.
+- Plural selectors must be one of `zero one two few many other` or `=N`. Any
+  other selector (typo or unsupported ICU form) throws `SyntaxError`.
+
+Runtime coercion:
+- Nullish (`undefined` or `null`) slot values render as `""` (nullish coalesce
+  on the hot path). Numeric zero and empty string render normally.
+- Slot reads use `Object.hasOwn`, so `{constructor}`, `{__proto__}`, and
+  other prototype-chain identifiers render as `""` unless supplied as own
+  properties on `params`.
+- `defineMessages` is atomic: templates compile into a staging Map first,
+  committed only on success. A bad template mid-dict throws without leaving
+  a partial update.
+- `Intl.PluralRules` construction failure (invalid locale tag) logs a single
+  `console.warn` and falls back to the environment default. Cached per locale
+  so it can't spam.
+- `loadLocale` invokes its loader via `Promise.resolve().then(loaderFn)`, so
+  synchronous throws inside the loader route through the async rejection
+  path. The inflight slot clears on both success and failure -- retry works
+  in every failure mode.
+
+Plural-object entries always use `count` as the variable name (matches
+TMS-export conventions and the `plural(key, count, params?)` sugar). For
+custom variable names, use the inline ICU form.
+
+Format-factory instance capture: `numberFormat(opts)`, `dateFormat(opts)`,
+etc. bind the target i18n instance at factory-creation time (not per call).
+If you hoist a factory at module scope and later swap the default via
+`setDefaultI18n`, the factory keeps reading the original. For per-tenant or
+SSR flows, pass the instance explicitly (`numberFormat(opts, tenantI18n)`)
+or use `createFormatters(i18n)`. The convenience form (`formatNumber(v,
+opts)`) re-resolves the default each call and does follow swaps.
+
+## Common idioms
+
+```js
+// Reactive translation binding
+import { effect } from "@zakkster/lite-signal";
+import { t, locale } from "@zakkster/lite-i18n";
+
+effect(() => (headerEl.textContent = t("header.title")));
+locale.set("bg");  // headerEl updates synchronously
+
+// Plural helper form
+defineMessages("en", { items: { one: "# item", other: "# items" } });
+plural("items", 3);                       // -> "3 items"
+
+// Inline plural form
+defineMessages("en", { m: "{n, plural, one {only #} other {# in total}}" });
+t("m", { n: 42 });                        // -> "42 in total"
+
+// Async chunk load with ready gate
+import { loadLocale, ready, locale } from "@zakkster/lite-i18n";
+effect(() => {
+    if (!ready("bg")()) { spinner.show(); return; }
+    spinner.hide();
+});
+loadLocale("bg", () => import("./locales/bg.js").then(m => m.default));
+
+// Fallback chain
+const i = createI18n({ locale: "de-CH", fallback: ["de", "en"] });
+
+// Multi-tenant sandbox
+const tenants = new Map();
+function forTenant(id) {
+    let t = tenants.get(id);
+    if (!t) {
+        t = createI18n({ locale: dbGetLocale(id), messages: dbGetMessages(id) });
+        tenants.set(id, t);
+    }
+    return t;
+}
+
+// Zero-alloc formatter for a render loop
+import { numberFormat } from "@zakkster/lite-i18n/format";
+const scoreFmt = numberFormat({ notation: "compact" });
+effect(() => scoreEl.textContent = scoreFmt(score()));
+```
+
+## Benchmark snapshot
+
+Zero-GC verification harness (Node 22, --expose-gc, warmed to 10k iterations
+then measured over 100k):
+
+| Workload                                                   | Retained heap |
+| ---------------------------------------------------------- | ------------- |
+| 100k `t()` calls with `{name}` + `{count}` interpolation   | < 200 KB      |
+| 100k inline-plural `t()` calls (`{n, plural, ...}`)        | < 300 KB      |
+| 100k `numberFormat` factory calls (currency, steady-state) | < 100 KB      |
+| 1000 redefine-then-read cycles                             | < 500 KB      |
+
+The only unavoidable per-call allocation is the produced string.
+
+## File layout
+
+- `I18n.js` -- core: tokenizer, compiler, createI18n, top-level default-instance routing.
+- `Format.js` -- Intl formatters, factories, createFormatters bulk binder.
+- `I18n.d.ts` / `Format.d.ts` -- TypeScript declarations.
+- `test/01-core.test.mjs` -- static/interpolation, nested dicts, missing-key policies, isolation.
+- `test/02-plural.test.mjs` -- plural-object entries, inline ICU, exact matches, CLDR selectors across en/bg/pl/ar.
+- `test/03-fallback.test.mjs` -- chain walk order, epoch bump semantics, non-fallback locale doesn't re-fire effects.
+- `test/04-async.test.mjs` -- loadLocale, ready signal, in-flight dedup, error retry.
+- `test/05-format.test.mjs` -- all 4 formatters, factory vs convenience, locale-switch reactivity, createFormatters.
+- `test/06-zero-gc.test.mjs` -- heap retention checks (--expose-gc).
+
+## Install
+
+```
+npm install @zakkster/lite-i18n
+```
+
+## License
+
+MIT

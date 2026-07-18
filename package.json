@@ -1,0 +1,77 @@
+{
+  "name": "@zakkster/lite-i18n",
+  "version": "1.0.0",
+  "description": "Zero-GC reactive internationalization built on lite-signal. Pre-compiled templates, cached Intl instances, CLDR plurals, fallback chains, ICU quoted-string escapes. ~3.1 KB min+gz core + ~0.6 KB format entry.",
+  "type": "module",
+  "main": "./I18n.js",
+  "module": "./I18n.js",
+  "types": "./I18n.d.ts",
+  "exports": {
+    ".": {
+      "types": "./I18n.d.ts",
+      "node": "./I18n.js",
+      "import": "./I18n.js",
+      "default": "./I18n.js"
+    },
+    "./format": {
+      "types": "./Format.d.ts",
+      "node": "./Format.js",
+      "import": "./Format.js",
+      "default": "./Format.js"
+    }
+  },
+  "files": [
+    "I18n.js",
+    "I18n.d.ts",
+    "Format.js",
+    "Format.d.ts",
+    "README.md",
+    "llms.txt",
+    "CHANGELOG.md",
+    "LICENSE.txt"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:gc": "node --test --expose-gc test/06-zero-gc.test.mjs",
+    "verify": "npm test && npm run test:gc"
+  },
+  "peerDependencies": {
+    "@zakkster/lite-signal": "^1.4.0"
+  },
+  "keywords": [
+    "i18n",
+    "internationalization",
+    "l10n",
+    "localization",
+    "translation",
+    "reactive",
+    "signals",
+    "lite-signal",
+    "zakkster",
+    "zero-gc",
+    "zero-allocation",
+    "intl",
+    "cldr",
+    "plural",
+    "icu",
+    "esm"
+  ],
+  "author": "Zahary Shinikchiev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-i18n.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-i18n/issues"
+  },
+  "homepage": "https://github.com/PeshoVurtoleta/lite-i18n#readme",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false
+}

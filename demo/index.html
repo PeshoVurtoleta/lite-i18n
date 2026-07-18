@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>lite-i18n oscilloscope</title>
+<style>
+    :root {
+        /* Phosphor palette -- hex declared first, oklch second, per convention */
+        --bg:       #050a08;
+        --bg-2:     #0a1512;
+        --grid:     #0e2820;
+        --phosphor: #00ff7f;
+        --dim:      #22775a;
+        --amber:    #ffa500;
+        --warn:     #ff4444;
+        --text:     #b9f0d4;
+        --text-dim: #6ca890;
+
+        --bg:       oklch(0.18 0.02 155);
+        --bg-2:     oklch(0.24 0.03 155);
+        --grid:     oklch(0.32 0.06 155);
+        --phosphor: oklch(0.87 0.24 149);
+        --dim:      oklch(0.55 0.14 155);
+        --amber:    oklch(0.80 0.19 75);
+        --warn:     oklch(0.70 0.24 25);
+        --text:     oklch(0.88 0.09 155);
+        --text-dim: oklch(0.68 0.09 155);
+
+        --font-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+        --border: 1px solid var(--grid);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        padding: 0;
+        min-height: 100dvh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        line-height: 1.5;
+        background-image:
+            repeating-linear-gradient(0deg, transparent 0, transparent 1.5rem, var(--grid) 1.5rem, var(--grid) calc(1.5rem + 1px)),
+            repeating-linear-gradient(90deg, transparent 0, transparent 1.5rem, var(--grid) 1.5rem, var(--grid) calc(1.5rem + 1px));
+    }
+
+    header {
+        padding: 1rem 1.5rem;
+        border-bottom: var(--border);
+        background: var(--bg-2);
+    }
+    header h1 {
+        margin: 0;
+        font-size: 1.125rem;
+        color: var(--phosphor);
+        letter-spacing: 0.05em;
+    }
+    header p {
+        margin: 0.25rem 0 0 0;
+        color: var(--text-dim);
+        font-size: 0.75rem;
+    }
+
+    #tabs {
+        display: flex;
+        gap: 0;
+        border-bottom: var(--border);
+        background: var(--bg-2);
+        overflow-x: auto;
+    }
+    #tabs button {
+        appearance: none;
+        background: transparent;
+        color: var(--text-dim);
+        border: none;
+        border-right: var(--border);
+        padding: 0.75rem 1.5rem;
+        font-family: inherit;
+        font-size: inherit;
+        cursor: pointer;
+        letter-spacing: 0.03em;
+        transition: color 120ms, background 120ms;
+    }
+    @media (hover: hover) {
+        #tabs button:hover { color: var(--text); background: rgba(0, 255, 127, 0.05); }
+    }
+    #tabs button.active {
+        color: var(--phosphor);
+        background: var(--bg);
+        border-bottom: 1px solid var(--bg);
+        margin-bottom: -1px;
+    }
+
+    main {
+        padding: 1.5rem;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1.5rem;
+        max-width: 80rem;
+        margin: 0 auto;
+    }
+    @media (min-width: 60rem) {
+        main { grid-template-columns: 1.5fr 1fr; }
+    }
+
+    .scene { display: none; }
+    .scene.active { display: contents; }
+
+    .panel {
+        background: var(--bg-2);
+        border: var(--border);
+        padding: 1rem;
+        min-height: 12rem;
+    }
+    .panel h2 {
+        margin: 0 0 0.75rem 0;
+        font-size: 0.8125rem;
+        color: var(--amber);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        border-bottom: 1px dashed var(--grid);
+        padding-bottom: 0.5rem;
+    }
+
+    .display {
+        font-size: 1.5rem;
+        color: var(--phosphor);
+        text-shadow: 0 0 0.5rem currentColor;
+        margin: 0 0 0.75rem 0;
+        min-height: 2.5rem;
+    }
+    .display-row { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+    .display-row .display { font-size: 1.125rem; margin: 0; }
+
+    .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin: 0.75rem 0;
+    }
+    .controls button, .controls select {
+        appearance: none;
+        background: var(--bg);
+        color: var(--phosphor);
+        border: 1px solid var(--dim);
+        padding: 0.4rem 0.75rem;
+        font-family: inherit;
+        font-size: inherit;
+        cursor: pointer;
+        transition: background 120ms, border-color 120ms;
+    }
+    @media (hover: hover) {
+        .controls button:hover, .controls select:hover {
+            background: rgba(0, 255, 127, 0.08);
+            border-color: var(--phosphor);
+        }
+    }
+    .controls button.active { background: var(--phosphor); color: var(--bg); }
+
+    input[type="range"], input[type="text"], input[type="number"] {
+        appearance: none;
+        width: 100%;
+        background: var(--bg);
+        color: var(--phosphor);
+        border: 1px solid var(--dim);
+        padding: 0.4rem 0.75rem;
+        font-family: inherit;
+        font-size: inherit;
+    }
+    input[type="range"] { padding: 0; height: 1.5rem; }
+
+    .log {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        max-height: 12rem;
+        overflow-y: auto;
+        background: var(--bg);
+        border: 1px solid var(--grid);
+        padding: 0.5rem;
+        white-space: pre;
+    }
+
+    .field { margin-bottom: 0.75rem; }
+    .field label {
+        display: block;
+        color: var(--text-dim);
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+    }
+
+    svg .diagram-bg { fill: var(--bg); }
+    svg .state-node circle { fill: var(--bg); stroke: var(--dim); stroke-width: 2; }
+    svg .state-node text { fill: var(--text-dim); font-family: var(--font-mono); font-size: 11px; }
+    svg .state-node.active circle { stroke: var(--phosphor); fill: rgba(0,255,127,0.1); }
+    svg .state-node.active text { fill: var(--phosphor); }
+    svg .arrow { stroke: var(--dim); stroke-width: 1.5; fill: none; }
+
+    code { color: var(--amber); }
+    kbd { background: var(--bg); border: 1px solid var(--dim); padding: 0.1rem 0.3rem; font-size: 0.75rem; }
+
+    /* Small utility classes so the markup can stay style-attribute-free */
+    .display--small { font-size: 1rem; }
+    .prose { color: var(--text-dim); font-size: 0.75rem; margin: 0 0 0.5rem 0; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>@zakkster/lite-i18n oscilloscope</h1>
+    <p>Reactive translation over lite-signal. Zero-GC hot path, compiled templates, synchronous flush.</p>
+</header>
+
+<nav id="tabs">
+    <button data-scene="basic" class="active">01 · basic</button>
+    <button data-scene="plural">02 · plural</button>
+    <button data-scene="fallback">03 · fallback</button>
+    <button data-scene="format">04 · format</button>
+</nav>
+
+<main>
+
+    <!-- SCENE 1: basic -->
+    <section id="scene-basic" class="scene active">
+        <div class="panel">
+            <h2>01 · interpolation + locale switch</h2>
+            <div class="display" id="basic-out">…</div>
+            <div class="field">
+                <label>name</label>
+                <input type="text" id="basic-name" value="Zahary" />
+            </div>
+            <div class="field">
+                <label>locale</label>
+                <div class="controls" id="basic-locales">
+                    <button data-loc="en" class="active">en</button>
+                    <button data-loc="bg">bg</button>
+                    <button data-loc="de">de</button>
+                    <button data-loc="fr">fr</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>state · signal graph</h2>
+            <svg viewBox="0 0 320 220" width="100%" height="200">
+                <defs>
+                    <marker id="ah1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                        <path d="M0,0 L10,5 L0,10 z" fill="#22775a" />
+                    </marker>
+                </defs>
+                <g class="state-node active" transform="translate(60, 40)"><circle r="28" /><text text-anchor="middle" y="4">locale</text></g>
+                <g class="state-node active" transform="translate(60, 140)"><circle r="28" /><text text-anchor="middle" y="4">_epoch</text></g>
+                <g class="state-node" transform="translate(200, 90)" id="node-t"><circle r="30" /><text text-anchor="middle" y="4">t()</text></g>
+                <g class="state-node" transform="translate(280, 90)"><circle r="24" /><text text-anchor="middle" y="4">DOM</text></g>
+                <path class="arrow" d="M 90 45 Q 130 45 172 82" marker-end="url(#ah1)" />
+                <path class="arrow" d="M 90 135 Q 130 135 172 98" marker-end="url(#ah1)" />
+                <path class="arrow" d="M 232 90 L 258 90" marker-end="url(#ah1)" />
+            </svg>
+            <div class="log" id="basic-log"></div>
+        </div>
+    </section>
+
+    <!-- SCENE 2: plural -->
+    <section id="scene-plural" class="scene">
+        <div class="panel">
+            <h2>02 · plural helper + inline ICU</h2>
+            <div class="display-row">
+                <div>
+                    <label>plural() helper -- <code>{one, other}</code> dict entry</label>
+                    <div class="display" id="plural-out-helper">…</div>
+                </div>
+                <div>
+                    <label>inline ICU -- <code>{n, plural, one {# item} other {# items}}</code></label>
+                    <div class="display" id="plural-out-inline">…</div>
+                </div>
+            </div>
+            <div class="field">
+                <label>count · <span id="plural-count">3</span></label>
+                <input type="range" id="plural-slider" min="0" max="42" value="3" step="1" />
+            </div>
+            <div class="field">
+                <label>locale (changes the CLDR selector map)</label>
+                <div class="controls" id="plural-locales">
+                    <button data-loc="en" class="active">en · one/other</button>
+                    <button data-loc="pl">pl · few/many</button>
+                    <button data-loc="ar">ar · zero/two/…</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>CLDR selection · Intl.PluralRules</h2>
+            <div class="display display--small" id="plural-selector">…</div>
+            <div class="log" id="plural-log"></div>
+        </div>
+    </section>
+
+    <!-- SCENE 3: fallback -->
+    <section id="scene-fallback" class="scene">
+        <div class="panel">
+            <h2>03 · fallback chain</h2>
+            <div class="field">
+                <label>t("welcome") · active locale is <code>de-CH</code></label>
+                <div class="display" id="fb-out">…</div>
+            </div>
+            <div class="field">
+                <label>fallback chain (walked left to right)</label>
+                <div class="controls" id="fb-chain">
+                    <button data-chain="[]">(none)</button>
+                    <button data-chain='["en"]'>[en]</button>
+                    <button data-chain='["de"]'>[de]</button>
+                    <button data-chain='["de","en"]' class="active">[de, en]</button>
+                    <button data-chain='["fr","de","en"]'>[fr, de, en]</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>dicts loaded · <code>de-CH</code> intentionally has no "welcome"</label>
+                <div class="log" id="fb-dicts"></div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>lookup path</h2>
+            <div class="log" id="fb-path"></div>
+        </div>
+    </section>
+
+    <!-- SCENE 4: format -->
+    <section id="scene-format" class="scene">
+        <div class="panel">
+            <h2>04 · Intl formatters</h2>
+            <div class="display-row">
+                <div>
+                    <label>numberFormat({ style: "currency", currency: "EUR" })</label>
+                    <div class="display" id="fmt-num">…</div>
+                </div>
+                <div>
+                    <label>dateFormat({ dateStyle: "long" })</label>
+                    <div class="display" id="fmt-date">…</div>
+                </div>
+                <div>
+                    <label>listFormat({ style: "long", type: "conjunction" })</label>
+                    <div class="display" id="fmt-list">…</div>
+                </div>
+                <div>
+                    <label>formatRelativeTime(-3, "day")</label>
+                    <div class="display" id="fmt-rt">…</div>
+                </div>
+            </div>
+            <div class="field">
+                <label>locale</label>
+                <div class="controls" id="fmt-locales">
+                    <button data-loc="en-US" class="active">en-US</button>
+                    <button data-loc="de-DE">de-DE</button>
+                    <button data-loc="fr-FR">fr-FR</button>
+                    <button data-loc="bg-BG">bg-BG</button>
+                    <button data-loc="ja-JP">ja-JP</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>zero-alloc factory</h2>
+            <p class="prose">
+                Each formatter closes over a <code>Map&lt;locale, Intl.Formatter&gt;</code>.
+                One Intl construction per unique locale, then reused. Locale switch retriggers
+                the effect; the cached instance for the current locale is a Map.get away.
+            </p>
+            <div class="log" id="fmt-log"></div>
+        </div>
+    </section>
+
+</main>
+
+<script type="importmap">
+{
+    "imports": {
+        "@zakkster/lite-signal": "https://esm.sh/@zakkster/lite-signal@1",
+        "@zakkster/lite-i18n": "../I18n.js",
+        "@zakkster/lite-i18n/format": "../Format.js"
+    }
+}
+</script>
+
+<script type="module">
+import { signal, effect, batch } from "@zakkster/lite-signal";
+import { createI18n } from "@zakkster/lite-i18n";
+import { numberFormat, dateFormat, listFormat, formatRelativeTime, createFormatters } from "@zakkster/lite-i18n/format";
+
+// ---------- Cached DOM refs (module-init convention) ----------
+const $tabs      = document.getElementById("tabs");
+const $scenes    = {
+    basic:    document.getElementById("scene-basic"),
+    plural:   document.getElementById("scene-plural"),
+    fallback: document.getElementById("scene-fallback"),
+    format:   document.getElementById("scene-format"),
+};
+
+// Basic
+const $basicOut       = document.getElementById("basic-out");
+const $basicName      = document.getElementById("basic-name");
+const $basicLocales   = document.getElementById("basic-locales");
+const $basicLog       = document.getElementById("basic-log");
+
+// Plural
+const $pluralHelper   = document.getElementById("plural-out-helper");
+const $pluralInline   = document.getElementById("plural-out-inline");
+const $pluralCount    = document.getElementById("plural-count");
+const $pluralSlider   = document.getElementById("plural-slider");
+const $pluralLocales  = document.getElementById("plural-locales");
+const $pluralSelector = document.getElementById("plural-selector");
+const $pluralLog      = document.getElementById("plural-log");
+
+// Fallback
+const $fbOut     = document.getElementById("fb-out");
+const $fbChain   = document.getElementById("fb-chain");
+const $fbDicts   = document.getElementById("fb-dicts");
+const $fbPath    = document.getElementById("fb-path");
+
+// Format
+const $fmtNum     = document.getElementById("fmt-num");
+const $fmtDate    = document.getElementById("fmt-date");
+const $fmtList    = document.getElementById("fmt-list");
+const $fmtRt      = document.getElementById("fmt-rt");
+const $fmtLocales = document.getElementById("fmt-locales");
+const $fmtLog     = document.getElementById("fmt-log");
+
+// ---------- Scene 1: basic ----------
+const basic = createI18n({
+    locale: "en",
+    messages: {
+        en: { greet: "Hello, {name}!" },
+        bg: { greet: "Здравей, {name}!" },
+        de: { greet: "Hallo, {name}!" },
+        fr: { greet: "Bonjour, {name} !" },
+    },
+});
+const nameSig = signal($basicName.value);
+$basicName.addEventListener("input", (e) => nameSig.set(e.target.value));
+
+$basicLocales.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const child of $basicLocales.children) child.classList.remove("active");
+    b.classList.add("active");
+    basic.locale.set(b.dataset.loc);
+});
+
+let basicRuns = 0;
+effect(() => {
+    const out = basic.t("greet", { name: nameSig() });
+    $basicOut.textContent = out;
+    basicRuns++;
+    prependLog($basicLog, `#${basicRuns} · locale=${basic.locale.peek()} · "${out}"`);
+});
+
+// ---------- Scene 2: plural ----------
+const plr = createI18n({
+    locale: "en",
+    messages: {
+        en: {
+            itemsObj: { one: "# item", other: "# items" },
+            itemsInline: "{n, plural, one {# item} other {# items}}",
+        },
+        pl: {
+            itemsObj: { one: "# element", few: "# elementy", many: "# elementów", other: "# elementu" },
+            itemsInline: "{n, plural, one {# element} few {# elementy} many {# elementów} other {# elementu}}",
+        },
+        ar: {
+            itemsObj: {
+                zero: "لا شيء", one: "عنصر واحد", two: "عنصران",
+                few: "# عناصر", many: "# عنصرا", other: "# عنصر",
+            },
+            itemsInline: "{n, plural, zero {لا شيء} one {عنصر واحد} two {عنصران} few {# عناصر} many {# عنصرا} other {# عنصر}}",
+        },
+    },
+});
+const pluralN = signal(+$pluralSlider.value);
+$pluralSlider.addEventListener("input", (e) => {
+    const v = +e.target.value;
+    pluralN.set(v);
+    $pluralCount.textContent = v;
+});
+$pluralLocales.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $pluralLocales.children) c.classList.remove("active");
+    b.classList.add("active");
+    plr.locale.set(b.dataset.loc);
+});
+let pluralRuns = 0;
+effect(() => {
+    const n = pluralN();
+    const helper = plr.plural("itemsObj", n);
+    const inline = plr.t("itemsInline", { n });
+    $pluralHelper.textContent = helper;
+    $pluralInline.textContent = inline;
+    const loc = plr.locale.peek();
+    const rules = new Intl.PluralRules(loc);
+    $pluralSelector.textContent = `Intl.PluralRules("${loc}").select(${n}) === "${rules.select(n)}"`;
+    pluralRuns++;
+    prependLog($pluralLog, `#${pluralRuns} · ${loc}(${n}) · helper="${helper}" inline="${inline}"`);
+});
+
+// ---------- Scene 3: fallback ----------
+const fb = createI18n({
+    locale: "de-CH",
+    fallback: ["de", "en"],
+    messages: {
+        "de-CH": {},                          // deliberately empty on "welcome"
+        de:     { welcome: "Willkommen (de)" },
+        en:     { welcome: "Welcome (en)" },
+        fr:     { welcome: "Bienvenue (fr)" },
+    },
+});
+$fbChain.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $fbChain.children) c.classList.remove("active");
+    b.classList.add("active");
+    fb.setFallback(JSON.parse(b.dataset.chain));
+});
+$fbDicts.textContent = "de-CH · {}\nde     · { welcome: \"Willkommen (de)\" }\nen     · { welcome: \"Welcome (en)\" }\nfr     · { welcome: \"Bienvenue (fr)\" }";
+
+let fbRuns = 0;
+effect(() => {
+    const s = fb.stats();
+    const out = fb.t("welcome");
+    $fbOut.textContent = out;
+    fbRuns++;
+    prependLog($fbPath,
+        `#${fbRuns} · [de-CH]->${s.fallback.length ? s.fallback.join("->") : "(none)"} · resolved="${out}"`);
+});
+
+// ---------- Scene 4: format ----------
+const fmt = createI18n({ locale: "en-US" });
+const F = createFormatters(fmt);
+const EUR = Object.freeze({ style: "currency", currency: "EUR" });
+const LONG_DATE = Object.freeze({ dateStyle: "long" });
+const LIST_CONJ = Object.freeze({ style: "long", type: "conjunction" });
+
+const num  = F.numberFormat(EUR);
+const date = F.dateFormat(LONG_DATE);
+const list = F.listFormat(LIST_CONJ);
+const now  = new Date();
+
+$fmtLocales.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $fmtLocales.children) c.classList.remove("active");
+    b.classList.add("active");
+    fmt.locale.set(b.dataset.loc);
+});
+let fmtRuns = 0;
+effect(() => {
+    $fmtNum.textContent  = num(1234567.89);
+    $fmtDate.textContent = date(now);
+    $fmtList.textContent = list(["signals", "compiled templates", "cached formatters"]);
+    $fmtRt.textContent   = formatRelativeTime(-3, "day", undefined, fmt);
+    fmtRuns++;
+    prependLog($fmtLog, `#${fmtRuns} · locale=${fmt.locale.peek()} · one Map.get per formatter (cached)`);
+});
+
+// ---------- Tabs ----------
+$tabs.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $tabs.children) c.classList.remove("active");
+    b.classList.add("active");
+    for (const k in $scenes) $scenes[k].classList.remove("active");
+    $scenes[b.dataset.scene].classList.add("active");
+});
+
+// ---------- Log helper ----------
+function prependLog(el, line) {
+    // Zero-GC-friendly: overwrite textContent with the composed value, keep max 40 lines.
+    const existing = el.textContent;
+    const lines = existing ? existing.split("\n") : [];
+    lines.unshift(line);
+    if (lines.length > 40) lines.length = 40;
+    el.textContent = lines.join("\n");
+}
+</script>
+
+</body>
+</html>
