@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-i18n",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Zero-GC reactive internationalization built on lite-signal. Pre-compiled ICU templates (plural, selectordinal, select, nested composition), cached Intl instances, CLDR plurals, fallback chains, ICU quoted-string escapes. ~3.5 KB min+gz core + ~0.76 KB format entry.",
   "type": "module",
   "main": "./I18n.js",

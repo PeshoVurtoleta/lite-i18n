@@ -144,8 +144,7 @@ runtime, zero-GC after warm-up. Peer dep on `@zakkster/lite-signal ^1.4.0`.
 - **Translation**: `t(key, params?)` and `plural(key, count, params?)` --
   both reactive, both subscribe to the current locale and the messages
   epoch, both call the compiled entry via a monomorphic `(params, locale,
-  getRules) => string` interface.
-
+  getPluralRules) => string` interface.
 ### Message DSL
 
 - **Static strings**, `{slot}` **interpolation**, **nested dicts** (dot-path

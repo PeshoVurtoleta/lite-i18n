@@ -54,6 +54,8 @@ export interface I18nStats {
     fallback: string[];
     /** Number of Intl.PluralRules instances cached (one per locale used with plurals). */
     pluralRulesCached: number;
+    /** Number of Intl.PluralRules ordinal instances cached (selectordinal). */
+    ordinalRulesCached: number;
     /** Number of `loadLocale` calls currently in flight. */
     loadsInFlight: number;
 }

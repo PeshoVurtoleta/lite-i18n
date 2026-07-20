@@ -82,3 +82,26 @@ test("defineMessages then read: 1000 rounds retain <500 KB", { skip: !hasGC }, a
     const delta = process.memoryUsage().heapUsed - before;
     assert.ok(delta < 500_000, `retained ${delta} bytes (>500 KB) after 1000 redefine cycles`);
 });
+
+test("stress: 100k locale-switch cycles do not leak", { skip: !hasGC }, async () => {
+    // Two locales alternating; effect subscriptions and epoch bumps must
+    // not accumulate observers.
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", { m: "Hi, {name}!" });
+    i.defineMessages("bg", { m: "Здравей, {name}!" });
+    const params = { name: "Zahary" };
+    for (let k = 0; k < 10000; k++) {
+        i.locale.set(k & 1 ? "bg" : "en");
+        i.t("m", params);
+    }
+    await idleGC();
+    const before = process.memoryUsage().heapUsed;
+    for (let k = 0; k < 100_000; k++) {
+        i.locale.set(k & 1 ? "bg" : "en");
+        i.t("m", params);
+    }
+    await idleGC();
+    const delta = process.memoryUsage().heapUsed - before;
+    assert.ok(delta < 500_000, `retained ${delta} bytes (>500 KB) after 100k locale switches`);
+});
+

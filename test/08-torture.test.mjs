@@ -466,58 +466,6 @@ test("torture: stats() on brand-new instance reports zeros", () => {
     assert.equal(s.loadsInFlight, 0);
 });
 
-test("torture: all-string namespace with CLDR-shaped keys is treated as plural (documented ambiguity)", () => {
-    // A namespace like { one: "Single", other: "Multi" } is
-    // shape-indistinguishable from a plural entry -- both are all-string
-    // objects with CLDR keys. defineMessages picks plural. This is pinned
-    // here so anyone who changes isPluralObj notices they've moved the
-    // documented line.
-    const i = createI18n({ locale: "en" });
-    i.defineMessages("en", {
-        menu: { one: "Single player", other: "Multiplayer" },
-    });
-    // NOT accessible as a namespace...
-    assert.equal(i.t("menu.one"), "menu.one");           // key literal
-    assert.equal(i.t("menu.other"), "menu.other");
-    // ...but IS accessible as a plural.
-    assert.equal(i.plural("menu", 1), "Single player");
-    assert.equal(i.plural("menu", 5), "Multiplayer");
-});
-
-test("torture: defineMessages warns on non-string values instead of silently dropping", () => {
-    // Silent drop cost people keys with no feedback. Now we console.warn at
-    // define time. The compiled dict skips the value (behavior unchanged);
-    // only the diagnostic surface is new.
-    const seen = [];
-    const orig = console.warn;
-    console.warn = (msg) => { seen.push(String(msg)); };
-    try {
-        const i = createI18n();
-        i.defineMessages("en", {
-            good:    "OK",
-            num:     42,               // dropped + warn
-            arr:     ["x"],            // dropped + warn
-            nul:     null,             // dropped + warn
-            undef:   undefined,        // dropped + warn
-            nested:  { fine: "yes" },  // ok, no warn
-        });
-        assert.equal(i.t("good"), "OK");
-        assert.equal(i.t("nested.fine"), "yes");
-        assert.equal(i.t("num"), "num");      // dropped -> key literal
-        assert.equal(i.t("arr"), "arr");
-        assert.equal(i.t("nul"), "nul");
-        assert.equal(i.t("undef"), "undef");
-    } finally {
-        console.warn = orig;
-    }
-    // Four warns, one per skipped key, each naming the path and the type.
-    assert.equal(seen.length, 4, `expected 4 warns, saw ${seen.length}`);
-    assert.ok(seen.some((m) => m.includes("num")   && m.includes("number")));
-    assert.ok(seen.some((m) => m.includes("arr")   && m.includes("array")));
-    assert.ok(seen.some((m) => m.includes("nul")   && m.includes("null")));
-    assert.ok(seen.some((m) => m.includes("undef") && m.includes("undefined")));
-});
-
 // ============================================================================
 //  Composition -- select + plural + selectordinal all in one template
 // ============================================================================

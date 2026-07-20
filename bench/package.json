@@ -1,0 +1,15 @@
+{
+  "name": "lite-i18n-bench",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark harness comparing lite-i18n vs i18next vs @formatjs/intl-messageformat.",
+  "scripts": {
+    "bench": "node run.mjs"
+  },
+  "dependencies": {
+    "@zakkster/lite-signal": "^1.4.0",
+    "i18next": "^23.15.0",
+    "intl-messageformat": "^11.2.12"
+  }
+}

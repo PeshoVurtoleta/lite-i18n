@@ -220,6 +220,7 @@
     <button data-scene="plural">02 · plural</button>
     <button data-scene="fallback">03 · fallback</button>
     <button data-scene="format">04 · format</button>
+    <button data-scene="select">05 · select + ordinal</button>
 </nav>
 
 <main>
@@ -374,6 +375,57 @@
         </div>
     </section>
 
+    <!-- SCENE 5: select + selectordinal (v1.1) -->
+    <section id="scene-select" class="scene">
+        <div class="panel">
+            <h2>05 · select + selectordinal</h2>
+            <div class="display-row">
+                <div>
+                    <label>select · <code>{g, select, male {…} female {…} other {…}}</code></label>
+                    <div class="display" id="sel-select">…</div>
+                </div>
+                <div>
+                    <label>selectordinal · <code>{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}</code></label>
+                    <div class="display" id="sel-ordinal">…</div>
+                </div>
+            </div>
+            <div class="field">
+                <label>gender</label>
+                <div class="controls" id="sel-gender">
+                    <button data-g="male" class="active">male · He</button>
+                    <button data-g="female">female · She</button>
+                    <button data-g="nonbinary">nonbinary · They (other)</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>place · <span id="sel-place">1</span></label>
+                <input type="range" id="sel-slider" min="1" max="42" value="1" step="1" />
+            </div>
+            <div class="field">
+                <label>locale (selectordinal category depends on it; select does not)</label>
+                <div class="controls" id="sel-locales">
+                    <button data-loc="en" class="active">en · one/two/few/other</button>
+                    <button data-loc="bg">bg · other-only</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>multi-axis composition</h2>
+            <p class="prose">
+                One template, three axes: <code>select</code> wraps <code>selectordinal</code>
+                wraps <code>plural</code>. Arbitrary nesting since v1.1.
+            </p>
+            <div class="display" id="sel-composed">…</div>
+            <div class="field">
+                <label>apple count · <span id="sel-apples">3</span></label>
+                <input type="range" id="sel-apples-slider" min="0" max="20" value="3" step="1" />
+            </div>
+            <div class="display display--small" id="sel-stats">…</div>
+            <div class="log" id="sel-log"></div>
+        </div>
+    </section>
+
 </main>
 
 <script type="importmap">
@@ -398,6 +450,7 @@ const $scenes    = {
     plural:   document.getElementById("scene-plural"),
     fallback: document.getElementById("scene-fallback"),
     format:   document.getElementById("scene-format"),
+    select:   document.getElementById("scene-select"),
 };
 
 // Basic
@@ -428,6 +481,19 @@ const $fmtList    = document.getElementById("fmt-list");
 const $fmtRt      = document.getElementById("fmt-rt");
 const $fmtLocales = document.getElementById("fmt-locales");
 const $fmtLog     = document.getElementById("fmt-log");
+
+// Select + selectordinal
+const $selSelect       = document.getElementById("sel-select");
+const $selOrdinal      = document.getElementById("sel-ordinal");
+const $selGender       = document.getElementById("sel-gender");
+const $selPlace        = document.getElementById("sel-place");
+const $selSlider       = document.getElementById("sel-slider");
+const $selLocales      = document.getElementById("sel-locales");
+const $selComposed     = document.getElementById("sel-composed");
+const $selApples       = document.getElementById("sel-apples");
+const $selApplesSlider = document.getElementById("sel-apples-slider");
+const $selStats        = document.getElementById("sel-stats");
+const $selLog          = document.getElementById("sel-log");
 
 // ---------- Scene 1: basic ----------
 const basic = createI18n({
@@ -563,6 +629,87 @@ effect(() => {
     $fmtRt.textContent   = formatRelativeTime(-3, "day", undefined, fmt);
     fmtRuns++;
     prependLog($fmtLog, `#${fmtRuns} · locale=${fmt.locale.peek()} · one Map.get per formatter (cached)`);
+});
+
+// ---------- Scene 5: select + selectordinal (v1.1) ----------
+const sel = createI18n({
+    locale: "en",
+    messages: {
+        en: {
+            greet:   "{g, select, male {He arrived} female {She arrived} other {They arrived}}",
+            place:   "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place",
+            composed:
+                "{g, select, "
+                + "male {He came in {n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place with {a, plural, one {# apple} other {# apples}}} "
+                + "female {She came in {n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place with {a, plural, one {# apple} other {# apples}}} "
+                + "other {They came in {n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place with {a, plural, one {# apple} other {# apples}}}}",
+        },
+        bg: {
+            greet:   "{g, select, male {Той дойде} female {Тя дойде} other {Те дойдоха}}",
+            place:   "{n, selectordinal, other {#-и}} място",
+            composed:
+                "{g, select, "
+                + "male {Той дойде на {n, selectordinal, other {#-и}} място с {a, plural, one {# ябълка} other {# ябълки}}} "
+                + "female {Тя дойде на {n, selectordinal, other {#-и}} място с {a, plural, one {# ябълка} other {# ябълки}}} "
+                + "other {Те дойдоха на {n, selectordinal, other {#-и}} място с {a, plural, one {# ябълка} other {# ябълки}}}}",
+        },
+    },
+});
+
+// Signals for reactive UI state -- hook initial values from the DOM inputs
+// so HTML and JS never disagree at boot.
+const selGenderSig = signal("male");
+const selPlaceSig  = signal(+$selSlider.value | 0);
+const selApplesSig = signal(+$selApplesSlider.value | 0);
+
+// Hook initial DOM labels from the signals rather than hardcoding.
+$selPlace.textContent  = String(selPlaceSig.peek());
+$selApples.textContent = String(selApplesSig.peek());
+
+$selGender.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $selGender.children) c.classList.remove("active");
+    b.classList.add("active");
+    selGenderSig.set(b.dataset.g);
+});
+
+$selSlider.addEventListener("input", (e) => {
+    const n = +e.target.value | 0;
+    $selPlace.textContent = String(n);
+    selPlaceSig.set(n);
+});
+
+$selApplesSlider.addEventListener("input", (e) => {
+    const a = +e.target.value | 0;
+    $selApples.textContent = String(a);
+    selApplesSig.set(a);
+});
+
+$selLocales.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    for (const c of $selLocales.children) c.classList.remove("active");
+    b.classList.add("active");
+    sel.locale.set(b.dataset.loc);
+});
+
+let selRuns = 0;
+effect(() => {
+    const g = selGenderSig();
+    const n = selPlaceSig();
+    const a = selApplesSig();
+    $selSelect.textContent   = sel.t("greet", { g });
+    $selOrdinal.textContent  = sel.t("place", { n });
+    $selComposed.textContent = sel.t("composed", { g, n, a });
+    selRuns++;
+    const s = sel.stats();
+    $selStats.textContent =
+        `stats · plural=${s.pluralRulesCached} · ordinal=${s.ordinalRulesCached} · locales=${s.locales}`;
+    prependLog(
+        $selLog,
+        `#${selRuns} · locale=${sel.locale.peek()} · g=${g} · n=${n} · a=${a}`
+    );
 });
 
 // ---------- Tabs ----------
