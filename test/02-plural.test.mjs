@@ -224,3 +224,147 @@ test("plural-object: '#' inside variant produces literal # (via helper)", () => 
     assert.equal(i.plural("m", 1), "# 1 item");
     assert.equal(i.plural("m", 5), "# 5 items");
 });
+
+// ---------- plural() helper on inline templates (regression) ----------
+// v1.0 bug: plural(key, count) hardcoded merge under "count", so inline
+// templates whose variable was named anything else (e.g. `{n, plural, ...}`)
+// silently rendered with no numeric substitution and picked the "other"
+// category regardless of the actual count. Fix: each compiled entry carries
+// .pluralVar and plural() merges under it.
+
+test("plural() on inline template with variable != 'count' uses the template's variable", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        files:    "{n, plural, one {# file} other {# files}}",
+        apples:   "{apples, plural, one {# apple} other {# apples}}",
+        withCount:"{count, plural, one {# item} other {# items}}",
+    });
+    assert.equal(i.plural("files", 1),     "1 file");
+    assert.equal(i.plural("files", 5),     "5 files");
+    assert.equal(i.plural("apples", 1),    "1 apple");
+    assert.equal(i.plural("apples", 42),   "42 apples");
+    assert.equal(i.plural("withCount", 1), "1 item");    // still works
+    assert.equal(i.plural("withCount", 5), "5 items");
+});
+
+test("plural() on inline selectordinal also picks up the template's variable", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        place: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
+    });
+    assert.equal(i.plural("place", 1),  "1st");
+    assert.equal(i.plural("place", 22), "22nd");
+});
+
+test("plural() on ambiguous multi-plural template falls back to 'count'", () => {
+    // Two plurals with different variables at top level. plural() cannot
+    // choose one; it merges as `count` (harmless -- the template doesn't
+    // reference count) and the caller should use t() with explicit params.
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        m: "{a, plural, one {A} other {As}} + {b, plural, one {B} other {Bs}}",
+    });
+    // Both plural variables undefined -> both pick "other" for numeric NaN in
+    // Intl.PluralRules. Deterministic, non-throwing.
+    const out = i.plural("m", 1);
+    assert.equal(typeof out, "string");
+    assert.ok(out.includes("+"));
+});
+
+test("plural() on static template is a no-op (renders template, ignores count)", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", { m: "no plural here" });
+    assert.equal(i.plural("m", 5), "no plural here");
+});
+
+// ---------- selectordinal (v1.1) ----------
+
+test("selectordinal: English 1st/2nd/3rd/4th ordinal suffixes", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        place: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place",
+    });
+    assert.equal(i.t("place", { n: 1 }), "1st place");
+    assert.equal(i.t("place", { n: 2 }), "2nd place");
+    assert.equal(i.t("place", { n: 3 }), "3rd place");
+    assert.equal(i.t("place", { n: 4 }), "4th place");
+});
+
+test("selectordinal: English teens use 'other' (11th, 12th, 13th)", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        place: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place",
+    });
+    // 11, 12, 13 are teens -> 'other' in English ordinal rules
+    assert.equal(i.t("place", { n: 11 }), "11th place");
+    assert.equal(i.t("place", { n: 12 }), "12th place");
+    assert.equal(i.t("place", { n: 13 }), "13th place");
+});
+
+test("selectordinal: English 21st/22nd/23rd (teens exception ends)", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        place: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place",
+    });
+    assert.equal(i.t("place", { n: 21 }), "21st place");
+    assert.equal(i.t("place", { n: 22 }), "22nd place");
+    assert.equal(i.t("place", { n: 23 }), "23rd place");
+});
+
+test("selectordinal: exact match =0 wins over CLDR selector", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        m: "{n, selectordinal, =0 {--} one {#st} two {#nd} few {#rd} other {#th}}",
+    });
+    assert.equal(i.t("m", { n: 0 }), "--");
+    assert.equal(i.t("m", { n: 1 }), "1st");
+});
+
+test("selectordinal cache is isolated from cardinal cache", () => {
+    // Same locale, both types used -> two separate cached Intl.PluralRules.
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        n:    "{n, plural, one {# item} other {# items}}",
+        rank: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
+    });
+    i.t("n", { n: 5 });
+    i.t("rank", { n: 5 });
+    const s = i.stats();
+    assert.equal(s.pluralRulesCached, 1, "cardinal cached");
+    assert.equal(s.ordinalRulesCached, 1, "ordinal cached separately");
+});
+
+test("selectordinal: missing 'other' throws at compile time", () => {
+    const i = createI18n();
+    assert.throws(
+        () => i.defineMessages("en", {
+            m: "{n, selectordinal, one {#st} two {#nd}}",
+        }),
+        SyntaxError
+    );
+});
+
+test("selectordinal: unknown selector throws", () => {
+    const i = createI18n();
+    assert.throws(
+        () => i.defineMessages("en", {
+            m: "{n, selectordinal, one {#st} nope {?} other {#th}}",
+        }),
+        SyntaxError
+    );
+});
+
+test("selectordinal: locale switch changes ordinal category", () => {
+    // English ordinals are one/two/few/other. Bulgarian ordinals collapse
+    // most numbers to "other". Same source, different categories.
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        m: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
+    });
+    i.defineMessages("bg", {
+        m: "{n, selectordinal, other {#-и}}",
+    });
+    assert.equal(i.t("m", { n: 3 }), "3rd");
+    i.locale.set("bg");
+    assert.equal(i.t("m", { n: 3 }), "3-и");
+});

@@ -2,6 +2,138 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.1.1 -- 2026-07-19 (review fixes)
+
+### Fixed
+
+- **`plural(key, count, params)` on inline templates whose plural variable
+  is not named `count` now merges under the correct name.** Previously,
+  `plural("files", 1)` on `"{n, plural, one {# file} other {# files}}"`
+  returned `" files"` (wrong count, wrong form, no error). Fix: compiler
+  scans top-level tokens for the outermost plural / selectordinal and
+  tags the entry with `.pluralVar`; `plural()` merges under that name.
+  Plural-object entries stay tagged with `"count"` per the implicit
+  convention. Ambiguous templates (multiple different plural variables
+  at top level) fall back to `"count"` and should use `t()` with explicit
+  params.
+- **Non-string dict values are no longer silently dropped.**
+  `defineMessages` now `console.warn`s when a value is neither a string
+  nor a plain object (numbers, arrays, null, undefined, functions,
+  symbols, bigints). Typos that used to lose keys with zero feedback now
+  surface at define time.
+- **Improved plural selector error surface.** `{n, plural, many2 {...}}`
+  and similar typos previously hit
+  `Expected '{' after plural selector "many"` because the accumulator
+  stopped at the digit. Now the accumulator reads letters + digits +
+  underscore after the first letter, so `many2` reaches the intended
+  `Unknown plural selector "many2" ... Valid selectors: zero, one, two,
+  few, many, other, or =N.` error.
+- **`Format.js` guards against partial Intl.** Environments missing
+  `Intl.ListFormat` or `Intl.RelativeTimeFormat` used to fail with
+  `"IntlCtor is not a constructor"` at first call. Now the getter throws
+  a named error at first use naming the missing constructor and
+  suggesting `@formatjs/intl-listformat` /
+  `@formatjs/intl-relativetimeformat` as polyfills.
+
+### Documented
+
+- **All-string namespaces with CLDR-shaped keys are treated as plural
+  entries.** A dict entry like `{ one: "Single", other: "Multiplayer" }`
+  is shape-indistinguishable from a plural; the ambiguity is inherent
+  and now called out in the README's Pluralization section with a
+  disambiguation recipe. Torture test (`08-torture.test.mjs`) pins the
+  current behavior so any future change to `isPluralObj` breaks visibly.
+- **Literal dotted keys collide with nested paths under insertion order
+  wins.** `{ "a.b": "LITERAL", a: { b: "NESTED" } }` -> `"NESTED"`.
+  Documented in `flattenInto`'s header.
+- **Per-locale Intl caches in factory-form formatters grow unbounded.**
+  Fine for a bounded locale set; per-request contexts should use
+  `createI18n()`-scoped instances so caches die with the request.
+  Documented in `Format.js`'s `makeCache` header.
+
+### Infrastructure
+
+- `.gitignore` added (excludes `node_modules/`, `bench/node_modules/`,
+  coverage, editor/OS crud).
+- `.github/workflows/ci.yml` runs behavior + zero-GC stress suites on
+  Node 18/20/22 with an Intl-coverage probe.
+- `package.json` aligned with the `@zakkster/lite-*` convention:
+  `author` and `bugs.email` carry `shinikchiev@yahoo.com`, `funding`
+  points to the GitHub sponsors page, `devDependencies` mirrors the peer.
+
+## 1.1.0 -- 2026-07-19
+
+### Added
+
+- **`select`**: ICU-style non-plural branching on any string param.
+  ```
+  {gender, select, male {He} female {She} other {They}}
+  ```
+  Cheaper than plural at runtime (no `Intl.PluralRules` dispatch -- pure
+  `Map.get(key)` with `other` fallback). Missing `other` throws
+  `SyntaxError` at define time. Selectors are unrestricted bare identifiers.
+
+- **`selectordinal`**: ordinal-category plural rules for "1st, 2nd, 3rd, ...".
+  Same shape as `plural`, uses
+  `Intl.PluralRules(locale, { type: "ordinal" })` under the hood. Cached
+  separately from cardinal rules, reported via `stats().ordinalRulesCached`.
+
+- **Arbitrary nesting in sub-templates**. The unsupported-shape guard is
+  preserved (`{n, number}` still throws), but `select`, `selectordinal`,
+  and `plural` compose freely inside each other. Enables the canonical
+  multi-axis message pattern:
+  ```
+  {gender, select, male {He has {n, plural, one {# apple} other {# apples}}} ...}
+  ```
+
+- **`bench/`**: comparison harness against `i18next` and
+  `intl-messageformat`. 4 workloads × 3 libraries × 1M iterations,
+  correctness-asserted before timing.
+
+- **Torture test suite** (`test/08-torture.test.mjs`, 40 tests): unicode
+  edge cases (ZWJ family emoji, RTL, combining marks, surrogate pairs,
+  ZWSP); regex-eating templates (slot named `plural`/`select`, literal
+  `plural,` in text, empty `{}`); parser corners (100-level nested dict,
+  1000-slot template, `=0..=50` exacts, malformed `=-1`); runtime numeric
+  edges (negative counts using `|n|`, `Infinity`/`NaN`, `1e20`, BigInt
+  spec-throw); degenerate params (null-prototype, frozen, throwing getter,
+  Symbol keys, `__proto__` hasOwn-guarded, prototype pollution safety);
+  reactive edges (locale.set inside effect, nested effects, onMissingKey
+  non-recursion, fallback self-reference); async torture (10 parallel
+  loads, mid-flight switch, reentrant loader); three-argument composition
+  (`select > selectordinal > plural`).
+
+- **Stress tests** (`test/06-zero-gc.test.mjs`, 7 tests, `--expose-gc`):
+  1M `t()` simple, 1M inline-plural, 1M select, 500k composition,
+  100k `numberFormat` factory, 1000 redefine cycles, 100k locale-switch
+  cycles. All under conservative retained-heap ceilings.
+
+- **Demo scene 5**: interactive select + selectordinal + composed
+  three-axis renderer with a live `stats()` readout showing the two
+  cache maps stay independent.
+
+### Changed
+
+- Argument-detection regex widened to accept `plural`, `selectordinal`,
+  and `select` in one alternation.
+- Internal `getPluralRules` renamed to `getRules(locale, ordinal)`;
+  instance handle `_getRules` routes between cardinal and ordinal caches.
+- `stats()` now reports `ordinalRulesCached` alongside `pluralRulesCached`.
+- Both tokenizers route through a shared `parseArgument(inner)`, so
+  nested argument blocks parse identically at any depth.
+
+### Size
+
+- Core `I18n.js`: 3.3 KB min+gz (v1.0.0 was 3.1 KB). +~300 B for select
+  + selectordinal + shared `parseArgument`. Under the 4 KB roadmap budget.
+- Format entry unchanged at ~0.6 KB.
+
+### Non-breaking
+
+Every template that compiled in v1.0.0 compiles the same in v1.1.0 with
+identical output. Templates that threw `SyntaxError` for `{g, select, ...}`
+now compile. No output shape changed.
+
 ## 1.0.0 -- initial release
 
 The full core surface. Compile-at-defineMessages, closure-over-token-array
@@ -12,7 +144,8 @@ runtime, zero-GC after warm-up. Peer dep on `@zakkster/lite-signal ^1.4.0`.
 - **Translation**: `t(key, params?)` and `plural(key, count, params?)` --
   both reactive, both subscribe to the current locale and the messages
   epoch, both call the compiled entry via a monomorphic `(params, locale,
-  getPluralRules) => string` interface.
+  getRules) => string` interface.
+
 ### Message DSL
 
 - **Static strings**, `{slot}` **interpolation**, **nested dicts** (dot-path

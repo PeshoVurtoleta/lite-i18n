@@ -3,7 +3,7 @@
 > Zero-GC reactive internationalization built on @zakkster/lite-signal. Compile
 > messages once at defineMessages -- runtime lookup is one Map.get and one fn
 > call, allocating nothing but the returned string. Synchronous reactive flush,
-> no microtask scheduler. ESM-only, ~3.1 KB min+gz core + ~0.6 KB Format entry,
+> no microtask scheduler. ESM-only, ~3.5 KB min+gz core + ~0.76 KB Format entry,
 > single peer dep on @zakkster/lite-signal (^1.4.0), MIT licensed.
 
 The library exposes translation primitives (t, plural, locale, defineMessages),
@@ -28,10 +28,21 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
   (`=0`, `=1`, ...) as own-property keys. Detected structurally at define
   time. Missing `other` -> treated as nested dict.
 
-- **Inline plural**: the ICU-lite syntax `{var, plural, sel {sub} sel {sub}}`.
-  `#` inside a sub-template is shorthand for `{var}`. Balanced-brace parser
-  supports mixing literals, `{slot}`, and one plural block per template
-  (nested plurals not supported).
+- **Inline arguments**: three ICU-lite constructs, all balanced-brace,
+  freely nested inside each other's sub-templates.
+  - `{var, plural, sel {sub} ...}` -- cardinal plural via
+    `Intl.PluralRules`.
+  - `{var, selectordinal, sel {sub} ...}` (v1.1) -- ordinal plural via
+    `Intl.PluralRules(loc, { type: "ordinal" })`. Same selector alphabet
+    as plural (`one two few many other`, `=N`).
+  - `{var, select, sel {sub} ...}` (v1.1) -- string-keyed dispatch, no
+    `Intl.PluralRules` call. Selectors are bare identifiers, `other`
+    required.
+  `#` inside plural/selectordinal sub-templates is shorthand for `{var}`.
+  Nested plural/select/selectordinal inside any sub-template is supported;
+  unsupported ICU shapes (`{n, number}`, `{d, date, short}`,
+  `{n, number, ::currency/EUR}`, `{n, choice, ...}`) throw `SyntaxError`
+  at define time -- same guard, whether at top level or nested.
 
 - **Reactive signals**: each instance holds a `_locale` signal (current
   locale) and a `_epoch` signal (bumped on defineMessages for active/fallback
@@ -118,6 +129,45 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.1.1** (2026-07-19, review fixes). Fixed `plural(key, count, params)`
+  silently returning wrong strings on inline templates whose plural
+  variable wasn't `count` (e.g. `{n, plural, ...}`) -- compiler now tags
+  each compiled entry with `.pluralVar` scanned from top-level tokens,
+  and `plural()` merges under that name. Added a define-time
+  `console.warn` when a dict value is neither string nor plain object
+  (numbers, arrays, null, undefined, etc.) so typos no longer lose keys
+  silently. Extended the plural selector accumulator to letters + digits
+  + underscore after the first letter so `many2` reaches the helpful
+  "Unknown plural selector" error instead of "Expected '{' after
+  selector". Guarded the Format entry against environments missing
+  `Intl.ListFormat` / `Intl.RelativeTimeFormat` (first-use error names
+  the missing constructor and suggests a polyfill). Documented the
+  all-string-CLDR-shaped-namespace ambiguity and the literal-dotted vs
+  nested-path collision. Added `.gitignore`, `.github/workflows/ci.yml`
+  (Node 18/20/22 matrix), and aligned `package.json` with the ecosystem
+  convention (email in author + bugs, funding field, devDependencies
+  mirroring peer). 175 behavior tests + 7 stress tests, 0 fail.
+  Size: 3.5 KB min+gz core (+~200 B for pluralVar tagging and the
+  selector fix), 0.76 KB Format (+~180 B for the guarded caches).
+
+- **1.1.0** (2026-07-19). Added `select` (string-keyed dispatch, no
+  PluralRules; token type 3) and `selectordinal` (ordinal categories via
+  `Intl.PluralRules(loc, { type: "ordinal" })`; separate `_ordinalRules`
+  cache; reported in `stats().ordinalRulesCached`). Both tokenizers route
+  through a shared `parseArgument` so plural/select/selectordinal compose
+  freely inside each other -- the canonical multi-axis ICU pattern is
+  supported. Non-breaking: every v1.0.0 template still compiles to the
+  same output. 163 behavior tests + 4 skipped GC in the default run
+  (167 total); 7 stress tests under `--expose-gc` push to 1M-iteration
+  workloads for simple/plural/select and 500k for composition. New
+  torture suite (`test/08-torture.test.mjs`) covers unicode edges,
+  regex-eating templates, parser corners, numeric edges, prototype
+  pollution, reactive reentrancy, and three-axis composition. Size:
+  3.3 KB min+gz core (v1.0.0 was 3.1 KB), Format entry unchanged.
+  Bench harness in `bench/` compares against i18next and
+  intl-messageformat -- lite-i18n leads all four workloads (3-6x vs
+  formatjs, 12-56x vs i18next on Node 22).
+
 - **1.0.0** (initial). Core surface: signal (`locale`, `_epoch`, `ready`),
   translation (`t`, `plural`), definition (`defineMessages`), async loading
   (`loadLocale`, `ready`), fallback chain (`setFallback`), missing-key
@@ -141,8 +191,11 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## When NOT to use
 
-- If you need full ICU MessageFormat with `select`, `selectordinal`, or
-  nested plurals -- use `@formatjs/intl-messageformat`.
+- If you need ICU number/date skeletons INSIDE templates
+  (`{n, number, ::currency/EUR}`, `{d, date, short}`) -- lite-i18n keeps
+  formatting in the Format entry (`numberFormat`, `dateFormat`, etc.);
+  use `@formatjs/intl-messageformat` if you must interleave format
+  specs with translation text.
 - If your translations require gender-marking or complex morphological
   agreement -- CLDR plural rules and `select` don't cover this.
 - If you need translation-management-system integration (Crowdin, Lokalise,
@@ -218,16 +271,21 @@ function createFormatters(i18n: I18n): BoundFormatters;  // all 8 bound to insta
 ## Message template DSL
 
 ```
-Template            := (Literal | Slot | PluralBlock | Quoted)*
+Template            := (Literal | Slot | ArgumentBlock | Quoted)*
 Literal             := any character except '{' or "'"; # is literal here (not a slot)
 Slot                := '{' Identifier '}'
-PluralBlock         := '{' Identifier ',' 'plural' ',' Variant+ '}'
-Variant             := Selector '{' SubTemplate '}'
-Selector            := CldrSelector | '=' Digits
+ArgumentBlock       := PluralBlock | OrdinalBlock | SelectBlock
+PluralBlock         := '{' Identifier ',' 'plural' ',' PluralVariant+ '}'
+OrdinalBlock        := '{' Identifier ',' 'selectordinal' ',' PluralVariant+ '}'
+SelectBlock         := '{' Identifier ',' 'select' ',' SelectVariant+ '}'
+PluralVariant       := PluralSelector '{' SubTemplate '}'
+SelectVariant       := SelectSelector '{' SubTemplate '}'
+PluralSelector      := CldrSelector | '=' Digits
+SelectSelector      := Identifier                 ; any bare identifier
 CldrSelector        := 'zero' | 'one' | 'two' | 'few' | 'many' | 'other'
-SubTemplate         := (SubLiteral | Slot | Hash | Quoted)*
+SubTemplate         := (SubLiteral | Slot | ArgumentBlock | Hash | Quoted)*
 SubLiteral          := any character except '{', '#', or "'"
-Hash                := '#'   ; equivalent to '{' <plural variable> '}'
+Hash                := '#'   ; equivalent to '{' <nearest enclosing plural/ordinal variable> '}'
 Quoted              := "'" QuotedContent "'"
                        ; Only opens when the "'" is followed by '{' '}' or '#'
                        ; Inside the section, '' is a literal apostrophe.
@@ -237,13 +295,14 @@ Identifier          := [a-zA-Z_][a-zA-Z0-9_]*
 ```
 
 Constraints enforced at compile time:
-- Every plural block must contain an `other` variant. Missing -> `SyntaxError`.
+- Every plural / selectordinal / select block must contain an `other`
+  variant. Missing -> `SyntaxError`.
 - Braces must balance (respecting quoted sections). Unmatched `{` -> `SyntaxError`.
-- One plural block per template; nested plurals not supported.
-- Slot keys are bare identifiers. A slot with a comma inside (`{n, number}`,
-  `{d, date, short}`, `{g, select, ...}`) is any unsupported ICU shape and
-  throws `SyntaxError` at define time -- previously these rendered silently
-  as `""`.
+- Argument blocks (plural/select/selectordinal) nest freely inside any
+  sub-template. Unsupported ICU shapes (`{n, number}`, `{d, date, short}`,
+  `{n, number, ::currency/EUR}`, `{n, choice, ...}`) throw `SyntaxError`
+  at define time -- same guard at any nesting depth.
+- Slot keys are bare identifiers.
 - Plural selectors must be one of `zero one two few many other` or `=N`. Any
   other selector (typo or unsupported ICU form) throws `SyntaxError`.
 
@@ -324,15 +383,31 @@ effect(() => scoreEl.textContent = scoreFmt(score()));
 
 ## Benchmark snapshot
 
-Zero-GC verification harness (Node 22, --expose-gc, warmed to 10k iterations
-then measured over 100k):
+Comparative `t()` throughput (Node 22, 1M iterations, 100k warm-up,
+correctness asserted before timing; harness in `bench/`):
+
+| Workload                        | lite-i18n    | i18next      | intl-messageformat |
+| ------------------------------- | ------------ | ------------ | ------------------ |
+| simple `{name}` interpolation   | 7.9 Mops/s   | 0.14 Mops/s  | 2.9 Mops/s         |
+| plural (en, count=5)            | 2.3 Mops/s   | 0.18 Mops/s  | 0.37 Mops/s        |
+| select (gender=male)            | 17.4 Mops/s  | 0.34 Mops/s  | 4.8 Mops/s         |
+| select + plural composition     | 2.1 Mops/s   | 0.18 Mops/s  | 0.34 Mops/s        |
+
+3-6x faster than `intl-messageformat` (formatjs), 12-56x faster than
+`i18next`.
+
+Zero-GC stress harness (Node 22, `--expose-gc`, warmed to 10k iterations
+then measured):
 
 | Workload                                                   | Retained heap |
 | ---------------------------------------------------------- | ------------- |
-| 100k `t()` calls with `{name}` + `{count}` interpolation   | < 200 KB      |
-| 100k inline-plural `t()` calls (`{n, plural, ...}`)        | < 300 KB      |
+| 1M `t()` calls with `{name}` + `{count}` interpolation    | < 1 MB        |
+| 1M inline-plural calls                                    | < 1.5 MB      |
+| 1M select calls (no PluralRules dispatch)                 | < 1 MB        |
+| 500k select+plural composition calls                      | < 2 MB        |
 | 100k `numberFormat` factory calls (currency, steady-state) | < 100 KB      |
 | 1000 redefine-then-read cycles                             | < 500 KB      |
+| 100k locale-switch cycles                                  | < 500 KB      |
 
 The only unavoidable per-call allocation is the produced string.
 
@@ -342,11 +417,14 @@ The only unavoidable per-call allocation is the produced string.
 - `Format.js` -- Intl formatters, factories, createFormatters bulk binder.
 - `I18n.d.ts` / `Format.d.ts` -- TypeScript declarations.
 - `test/01-core.test.mjs` -- static/interpolation, nested dicts, missing-key policies, isolation.
-- `test/02-plural.test.mjs` -- plural-object entries, inline ICU, exact matches, CLDR selectors across en/bg/pl/ar.
+- `test/02-plural.test.mjs` -- plural-object entries, inline ICU, exact matches, CLDR selectors across en/bg/pl/ar, selectordinal categories.
 - `test/03-fallback.test.mjs` -- chain walk order, epoch bump semantics, non-fallback locale doesn't re-fire effects.
 - `test/04-async.test.mjs` -- loadLocale, ready signal, in-flight dedup, error retry.
 - `test/05-format.test.mjs` -- all 4 formatters, factory vs convenience, locale-switch reactivity, createFormatters.
-- `test/06-zero-gc.test.mjs` -- heap retention checks (--expose-gc).
+- `test/06-zero-gc.test.mjs` -- heap retention stress (--expose-gc), 1M-iteration workloads.
+- `test/07-select.test.mjs` -- select dispatch, other-fallback, composition with plural, escape handling in variants (v1.1).
+- `test/08-torture.test.mjs` -- unicode edges, regex-eating templates, parser corners, numeric edges (`Infinity`/`NaN`/BigInt), prototype pollution safety, reactive reentrancy, three-axis composition (v1.1).
+- `bench/run.mjs` -- comparative harness vs i18next and intl-messageformat, 4 workloads × 3 libraries × 1M iterations, correctness asserted.
 
 ## Install
 

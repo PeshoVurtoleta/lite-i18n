@@ -1,7 +1,7 @@
 {
   "name": "@zakkster/lite-i18n",
-  "version": "1.0.0",
-  "description": "Zero-GC reactive internationalization built on lite-signal. Pre-compiled templates, cached Intl instances, CLDR plurals, fallback chains, ICU quoted-string escapes. ~3.1 KB min+gz core + ~0.6 KB format entry.",
+  "version": "1.1.1",
+  "description": "Zero-GC reactive internationalization built on lite-signal. Pre-compiled ICU templates (plural, selectordinal, select, nested composition), cached Intl instances, CLDR plurals, fallback chains, ICU quoted-string escapes. ~3.5 KB min+gz core + ~0.76 KB format entry.",
   "type": "module",
   "main": "./I18n.js",
   "module": "./I18n.js",
@@ -18,7 +18,8 @@
       "node": "./Format.js",
       "import": "./Format.js",
       "default": "./Format.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "I18n.js",
@@ -38,6 +39,9 @@
   "peerDependencies": {
     "@zakkster/lite-signal": "^1.4.0"
   },
+  "devDependencies": {
+    "@zakkster/lite-signal": "^1.4.0"
+  },
   "keywords": [
     "i18n",
     "internationalization",
@@ -53,17 +57,20 @@
     "intl",
     "cldr",
     "plural",
+    "selectordinal",
+    "select",
     "icu",
     "esm"
   ],
-  "author": "Zahary Shinikchiev",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PeshoVurtoleta/lite-i18n.git"
   },
   "bugs": {
-    "url": "https://github.com/PeshoVurtoleta/lite-i18n/issues"
+    "url": "https://github.com/PeshoVurtoleta/lite-i18n/issues",
+    "email": "shinikchiev@yahoo.com"
   },
   "homepage": "https://github.com/PeshoVurtoleta/lite-i18n#readme",
   "funding": {

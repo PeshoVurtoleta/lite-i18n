@@ -14,8 +14,25 @@
 
 > Zero-GC reactive internationalization built on `@zakkster/lite-signal`.
 > Templates pre-compile to closures over stable token arrays; the hot path
-> allocates nothing but the returned string. ~3.1 KB min+gz core, ~0.6 KB for
+> allocates nothing but the returned string. ~3.5 KB min+gz core, ~0.76 KB for
 > the Intl formatter entry.
+
+## The numbers
+
+`t()` throughput vs the two most common runtime i18n libraries. Same
+input, same output (correctness asserted before timing), same machine.
+Node 22, 1M iterations after 100k warm-up.
+
+| workload | **lite-i18n** | i18next | formatjs |
+|---|---:|---:|---:|
+| simple `{name}` interpolation | **7.9 Mops/s** | 0.14 Mops/s | 2.9 Mops/s |
+| plural `{n, plural, one {…} other {…}}` | **2.3 Mops/s** | 0.18 Mops/s | 0.37 Mops/s |
+| select `{g, select, male {…} other {…}}` | **17.4 Mops/s** | 0.34 Mops/s | 4.8 Mops/s |
+| select + plural composition | **2.1 Mops/s** | 0.18 Mops/s | 0.34 Mops/s |
+
+**3× to 6× faster than formatjs. 12× to 56× faster than i18next.**
+Full methodology, re-runnable harness, and fairness caveats in
+[`bench/`](./bench).
 
 ```
 npm install @zakkster/lite-i18n
@@ -348,6 +365,81 @@ Both forms consult `Intl.PluralRules` for the current locale, so:
 
 Provide the variants your target locales actually use. `other` is required in
 every plural block -- a missing `other` throws `SyntaxError` at define time.
+
+### Ambiguity: all-string namespaces with CLDR-shaped keys
+
+A dict entry whose value is an object with only CLDR keys (`zero one two few
+many other`) or exact patterns (`=N`), all pointing to strings, is
+indistinguishable from a plural entry by shape alone. `defineMessages` treats
+it as a plural.
+
+```js
+// This is treated as a plural entry, NOT a nested namespace.
+defineMessages("en", {
+    menu: { one: "Single player", other: "Multiplayer" },
+});
+t("menu.one");             // -> "menu.one" (key literal; menu.one doesn't exist)
+plural("menu", 1);         // -> "Single player"
+```
+
+If you want two separate menu entries and their labels happen to collide with
+CLDR selector names, disambiguate by giving the namespace a non-CLDR key, or
+by naming the entries explicitly (`menu.solo`, `menu.multi`) rather than
+`menu.one` / `menu.other`.
+
+### Ordinal (`selectordinal`)
+
+For "1st, 2nd, 3rd, 4th…" — same shape as `plural`, different rule set
+under the hood (`Intl.PluralRules(locale, { type: "ordinal" })`, cached
+separately from cardinal):
+
+```js
+defineMessages("en", {
+    place: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} place",
+});
+t("place", { n: 1 });   // -> "1st place"
+t("place", { n: 22 });  // -> "22nd place"
+t("place", { n: 11 });  // -> "11th place"  (teens exception)
+```
+
+## Select
+
+Non-plural branching on any string value — gender, role, tier, status,
+whatever your template needs to switch on. Cheaper than plural at runtime
+because there's no `Intl.PluralRules` dispatch; it's a `Map.get(key)` with
+`other` fallback.
+
+```js
+defineMessages("en", {
+    greet: "{gender, select, male {sir} female {ma'am} other {friend}}",
+    role:  "{role, select, admin {A} owner {O} other {?}}",
+});
+t("greet", { gender: "female" });  // -> "ma'am"
+t("role",  { role: "owner" });     // -> "O"
+```
+
+`other` is required (missing it throws `SyntaxError`). Selectors are bare
+identifiers — no numeric `=N` form (that's plural-specific).
+
+### Multi-axis composition
+
+The canonical ICU pattern for messages that vary along more than one axis
+(gender × count, tier × status, etc.):
+
+```js
+defineMessages("en", {
+    m: "{gender, select, "
+        + "male {He has {n, plural, one {# apple} other {# apples}}} "
+        + "female {She has {n, plural, one {# apple} other {# apples}}} "
+        + "other {They have {n, plural, one {# apple} other {# apples}}}}",
+});
+t("m", { gender: "male", n: 1 });   // -> "He has 1 apple"
+t("m", { gender: "female", n: 5 }); // -> "She has 5 apples"
+```
+
+Arbitrary nesting of `plural` / `select` / `selectordinal` inside
+sub-templates is supported. The comma-slot guard still rejects unsupported
+ICU shapes (`{n, number}`, `{d, date, short}`, etc.) at compile time.
 
 ---
 

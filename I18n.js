@@ -81,6 +81,32 @@ function findMatchingBrace(s, start) {
     throw new SyntaxError(`Unmatched '{' at position ${start} in: ${s}`);
 }
 
+/** Parse the inside of a {...} argument block. Shared by tokenizeMessage
+ *  and tokenizeSub so nested plural / select / selectordinal blocks compose
+ *  the way ICU expects: `{g, select, male {He has {n, plural, one {# apple}
+ *  other {# apples}}} ...}` is the canonical multi-axis pattern.
+ *
+ *  Forward-declared at module level -- compilePluralToken and
+ *  compileSelectToken are defined below; function declarations are hoisted. */
+function parseArgument(inner) {
+    const pm = /^\s*(\w+)\s*,\s*(plural|selectordinal|select)\s*,\s*([\s\S]+)$/.exec(inner);
+    if (pm) {
+        const kind = pm[2];
+        if (kind === "select") return compileSelectToken(pm[1], pm[3]);
+        return compilePluralToken(pm[1], pm[3], kind === "selectordinal");
+    }
+    const key = inner.trim();
+    // Bare identifier is a slot. Anything with a comma is an unsupported
+    // ICU shape ({n, number}, {d, date}, etc.) -- fail loudly.
+    if (key.indexOf(",") !== -1) {
+        throw new SyntaxError(
+            `Unsupported ICU argument "{${inner}}". lite-i18n supports {slot}, {var, plural, ...}, {var, selectordinal, ...}, {var, select, ...}. ` +
+            `For number/date/list/relative-time formatting use the Format entry (formatNumber, formatDate, ...).`
+        );
+    }
+    return { type: 1, key };
+}
+
 /** Tokenize a top-level message template.
  *
  *  ICU quoted-string escape mode:
@@ -128,23 +154,7 @@ function tokenizeMessage(template) {
             if (literal) { tokens.push({ type: 0, str: literal }); literal = ""; }
             const close = findMatchingBrace(template, i);
             const inner = template.slice(i + 1, close);
-            const pm = /^\s*(\w+)\s*,\s*plural\s*,\s*([\s\S]+)$/.exec(inner);
-            if (pm) {
-                tokens.push(compilePluralToken(pm[1], pm[2]));
-            } else {
-                const key = inner.trim();
-                // A slot key is a bare identifier. If the inner contains a
-                // comma, this is a full-ICU construct (select, number, date,
-                // etc.) that lite-i18n does not implement -- fail loudly at
-                // compile time instead of silently rendering "".
-                if (key.indexOf(",") !== -1) {
-                    throw new SyntaxError(
-                        `Unsupported ICU argument "{${inner}}". lite-i18n supports {slot} and {var, plural, ...}. ` +
-                        `For number/date/list/relative-time formatting use the Format entry (formatNumber, formatDate, ...).`
-                    );
-                }
-                tokens.push({ type: 1, key });
-            }
+            tokens.push(parseArgument(inner));
             i = close + 1;
             continue;
         }
@@ -200,14 +210,8 @@ function tokenizeSub(template, pluralVariable) {
         if (ch === 123) {                        // {
             if (literal) { tokens.push({ type: 0, str: literal }); literal = ""; }
             const close = findMatchingBrace(template, i);
-            const key = template.slice(i + 1, close).trim();
-            if (key.indexOf(",") !== -1) {
-                throw new SyntaxError(
-                    `Unsupported ICU argument "{${key}}" inside plural sub-template. ` +
-                    `lite-i18n supports {slot}; nested plurals and inline select/number/date are not implemented.`
-                );
-            }
-            tokens.push({ type: 1, key });
+            const inner = template.slice(i + 1, close);
+            tokens.push(parseArgument(inner));
             i = close + 1;
             continue;
         }
@@ -218,8 +222,10 @@ function tokenizeSub(template, pluralVariable) {
     return tokens;
 }
 
-/** Compile an inline plural block: `variable {selector {sub} selector {sub} ...}`. */
-function compilePluralToken(variable, body) {
+/** Compile an inline plural block. `ordinal` selects between cardinal
+ *  (Intl.PluralRules) and ordinal (Intl.PluralRules { type: "ordinal" })
+ *  category selection at render time. */
+function compilePluralToken(variable, body, ordinal) {
     const exact = new Map();
     const variants = new Map();
     const len = body.length;
@@ -239,9 +245,15 @@ function compilePluralToken(variable, body) {
         } else {
             while (i < len) {
                 const c = body.charCodeAt(i);
+                // First char: letter. Subsequent chars: letter | digit | _ so
+                // typos like `many2` or `others_` are read as a single bad
+                // selector and hit the "Unknown plural selector" error below
+                // instead of degrading to "Expected '{' after selector".
+                const first = sel.length === 0;
                 if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90)) {
-                    sel += body[i];
-                    i++;
+                    sel += body[i]; i++;
+                } else if (!first && ((c >= 48 && c <= 57) || c === 95)) {
+                    sel += body[i]; i++;
                 } else break;
             }
         }
@@ -259,16 +271,55 @@ function compilePluralToken(variable, body) {
             variants.set(sel, subTokens);
         } else {
             throw new SyntaxError(
-                `Unknown plural selector "${sel}" in {${variable}, plural, ...}. ` +
+                `Unknown plural selector "${sel}" in {${variable}, ${ordinal ? "selectordinal" : "plural"}, ...}. ` +
                 `Valid selectors: zero, one, two, few, many, other, or =N.`
             );
         }
         i = close + 1;
     }
     if (!variants.has("other")) {
-        throw new SyntaxError(`Plural block for "${variable}" missing required "other" variant`);
+        throw new SyntaxError(
+            `${ordinal ? "Selectordinal" : "Plural"} block for "${variable}" missing required "other" variant`
+        );
     }
-    return { type: 2, variable, exact, variants };
+    return { type: 2, variable, exact, variants, ordinal: !!ordinal };
+}
+
+/** Compile a select block: string-keyed dispatch via params[variable], with
+ *  a required 'other' fallback. Cheaper than plural at runtime -- no
+ *  PluralRules constructor, no locale dependency for selection. */
+function compileSelectToken(variable, body) {
+    const variants = new Map();
+    const len = body.length;
+    let i = 0;
+    while (i < len) {
+        while (i < len && body.charCodeAt(i) <= 32) i++;
+        if (i >= len) break;
+        // Selector: bare identifier, unrestricted. No =N syntax.
+        let sel = "";
+        while (i < len) {
+            const c = body.charCodeAt(i);
+            // Same identifier alphabet as slot names, plus digits after first char.
+            if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95) {
+                sel += body[i]; i++;
+            } else if (sel.length > 0 && c >= 48 && c <= 57) {
+                sel += body[i]; i++;
+            } else break;
+        }
+        if (!sel) throw new SyntaxError(`Expected select selector at position ${i} in: ${body}`);
+        while (i < len && body.charCodeAt(i) <= 32) i++;
+        if (body.charCodeAt(i) !== 123) {
+            throw new SyntaxError(`Expected '{' after select selector "${sel}"`);
+        }
+        const close = findMatchingBrace(body, i);
+        const subTokens = tokenizeSub(body.slice(i + 1, close), variable);
+        variants.set(sel, subTokens);
+        i = close + 1;
+    }
+    if (!variants.has("other")) {
+        throw new SyntaxError(`Select block for "${variable}" missing required "other" variant`);
+    }
+    return { type: 3, variable, variants };
 }
 
 // ---------- Renderer ----------
@@ -291,17 +342,22 @@ function renderTokens(tokens, params, locale, getRules) {
         } else if (type === 1) {
             const key = t.key;
             out += Object.hasOwn(params, key) ? (params[key] ?? "") : "";
-        } else {
+        } else if (type === 2) {
             const nVal = params[t.variable];
             const ex = t.exact.get(nVal);
             if (ex !== undefined) {
                 out += renderTokens(ex, params, locale, getRules);
             } else {
-                const rules = getRules(locale);
+                const rules = getRules(locale, t.ordinal);
                 const sel = rules.select(nVal);
                 const variant = t.variants.get(sel) || t.variants.get("other");
                 out += renderTokens(variant, params, locale, getRules);
             }
+        } else {
+            // type 3: select -- string-keyed dispatch, no PluralRules
+            const key = params[t.variable];
+            const variant = t.variants.get(key) || t.variants.get("other");
+            out += renderTokens(variant, params, locale, getRules);
         }
     }
     return out;
@@ -320,17 +376,36 @@ function compileString(template) {
     if (template.indexOf("{") === -1 &&
         template.indexOf("#") === -1 &&
         template.indexOf("'") === -1) {
-        return function () { return template; };
+        const fn = function () { return template; };
+        fn.pluralVar = null;
+        return fn;
     }
     const tokens = tokenizeMessage(template);
     // If tokenizer collapsed to a single literal, specialize.
     if (tokens.length === 1 && tokens[0].type === 0) {
         const s = tokens[0].str;
-        return function () { return s; };
+        const fn = function () { return s; };
+        fn.pluralVar = null;
+        return fn;
     }
-    return function (params, locale, getRules) {
+    // For plural(key, count, params): find the outermost plural/selectordinal
+    // token, if exactly one exists, so plural() merges count under the right
+    // variable name. Multiple different plural variables at top level are
+    // ambiguous -- plural() falls back to "count" and the caller should use
+    // t() with an explicit params object.
+    let pluralVar = null;
+    let ambiguous = false;
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].type === 2) {                  // plural / selectordinal
+            if (pluralVar === null) pluralVar = tokens[i].variable;
+            else if (pluralVar !== tokens[i].variable) { ambiguous = true; break; }
+        }
+    }
+    const fn = function (params, locale, getRules) {
         return renderTokens(tokens, params || EMPTY_PARAMS, locale, getRules);
     };
+    fn.pluralVar = ambiguous ? null : pluralVar;
+    return fn;
 }
 
 function isPluralObj(v) {
@@ -373,7 +448,7 @@ function compilePluralObj(obj) {
     if (!variants.has("other")) {
         throw new SyntaxError(`Plural-object entry missing required "other" variant`);
     }
-    return function (params, locale, getRules) {
+    const fn = function (params, locale, getRules) {
         const p = params || EMPTY_PARAMS;
         const nVal = p.count;
         const ex = exact.get(nVal);
@@ -383,11 +458,17 @@ function compilePluralObj(obj) {
         const variant = variants.get(sel) || variants.get("other");
         return renderTokens(variant, p, locale, getRules);
     };
+    fn.pluralVar = "count";
+    return fn;
 }
 
 const EMPTY_PARAMS = Object.freeze({});
 
-/** Flatten a nested dict into a Map<dot.path, compiledEntry>. */
+/** Flatten a nested dict into a Map<dot.path, compiledEntry>.
+ *  A literal dotted key (`"a.b": "..."`) and a nested path (`a: { b: "..." }`)
+ *  collide on the same output slot -- resolution is insertion order (last
+ *  write wins), because Map.set overwrites. This is deterministic; if you
+ *  need both to coexist, rename one. */
 function flattenInto(dict, prefix, out) {
     const keys = Object.keys(dict);
     for (let i = 0; i < keys.length; i++) {
@@ -402,8 +483,21 @@ function flattenInto(dict, prefix, out) {
             } else {
                 flattenInto(v, path, out);
             }
+        } else {
+            // Numbers, arrays, null, undefined, functions, symbols, bigints.
+            // Silent drop caused typos to lose keys without a sound; warn
+            // once at define time. Not gated on missingKeyPolicy because
+            // that policy controls RUNTIME missing-key behavior, not the
+            // shape of the dict being defined.
+            if (typeof console !== "undefined" && console.warn) {
+                const t = v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
+                console.warn(
+                    `[lite-i18n] defineMessages: skipping "${path}" -- ` +
+                    `expected string or nested object, got ${t}. ` +
+                    `Typos here silently lose keys; check the dict shape.`
+                );
+            }
         }
-        // Everything else (numbers, arrays, null, undefined) is skipped silently.
     }
 }
 
@@ -426,7 +520,8 @@ export function createI18n(config) {
     const _locale = signal(cfg.locale || "en");
     const _epoch  = signal(0);
     const _dicts = new Map();                    // locale -> Map<key, compiledFn>
-    const _pluralRules = new Map();              // locale -> Intl.PluralRules
+    const _pluralRules = new Map();              // locale -> Intl.PluralRules (cardinal)
+    const _ordinalRules = new Map();             // locale -> Intl.PluralRules (ordinal)
     const _readySignals = new Map();             // locale -> signal<bool>
     const _loadPromises = new Map();             // locale -> Promise<void>
     const _fallback = [];
@@ -442,23 +537,28 @@ export function createI18n(config) {
         _epoch.update(function (n) { return (n + 1) | 0; });
     }
 
-    function getPluralRules(loc) {
-        let r = _pluralRules.get(loc);
+    function getRules(loc, ordinal) {
+        const cache = ordinal ? _ordinalRules : _pluralRules;
+        let r = cache.get(loc);
         if (r) return r;
         try {
-            r = new Intl.PluralRules(loc);
+            r = ordinal
+                ? new Intl.PluralRules(loc, { type: "ordinal" })
+                : new Intl.PluralRules(loc);
         } catch (err) {
-            // Warn ONCE per bad locale -- the cache below stops repeated
-            // constructor attempts, so this is naturally rate-limited.
+            // Warn ONCE per bad locale + type -- the caches below stop
+            // repeated constructor attempts, so this is naturally rate-limited.
             if (typeof console !== "undefined" && console.warn) {
                 console.warn(
-                    `[lite-i18n] Intl.PluralRules("${loc}") threw ${err.name}: ${err.message}. ` +
+                    `[lite-i18n] Intl.PluralRules("${loc}"${ordinal ? ", ordinal" : ""}) threw ${err.name}: ${err.message}. ` +
                     `Falling back to the environment default. Check the locale tag.`
                 );
             }
-            r = new Intl.PluralRules();
+            r = ordinal
+                ? new Intl.PluralRules(undefined, { type: "ordinal" })
+                : new Intl.PluralRules();
         }
-        _pluralRules.set(loc, r);
+        cache.set(loc, r);
         return r;
     }
 
@@ -531,7 +631,7 @@ export function createI18n(config) {
         const loc = _locale();                   // subscribe + read
         _epoch();                                // subscribe (defineMessages / setFallback)
         const entry = lookup(key, loc);
-        if (entry !== undefined) return entry(params, loc, getPluralRules);
+        if (entry !== undefined) return entry(params, loc, getRules);
         return handleMissing(key, loc);
     }
 
@@ -540,11 +640,15 @@ export function createI18n(config) {
         _epoch();
         const entry = lookup(key, loc);
         if (entry === undefined) return handleMissing(key, loc);
-        // Merge count into params without mutating the caller's object.
-        // One small alloc per call is acceptable here -- for hot-path use
-        // include `count` in params yourself and call t(key, params) directly.
-        const p = params ? { ...params, count } : { count };
-        return entry(p, loc, getPluralRules);
+        // Merge count into params under the template's plural variable name.
+        // compileString/compilePluralObj tag each entry with .pluralVar; when
+        // absent (static template, or ambiguous multi-plural template), fall
+        // back to "count" -- harmless when the template doesn't reference it.
+        // One small alloc per call is acceptable; for hot-path use include
+        // the variable in params yourself and call t(key, params) directly.
+        const varName = entry.pluralVar || "count";
+        const p = params ? { ...params, [varName]: count } : { [varName]: count };
+        return entry(p, loc, getRules);
     }
 
     function setFallback(f) {
@@ -623,6 +727,7 @@ export function createI18n(config) {
             currentLocale: _locale.peek(),
             fallback: _fallback.slice(),
             pluralRulesCached: _pluralRules.size,
+            ordinalRulesCached: _ordinalRules.size,
             loadsInFlight: _loadPromises.size,
         };
     }
@@ -652,7 +757,7 @@ export function createI18n(config) {
         stats,
         // Internal:
         _epoch,
-        _getPluralRules: getPluralRules,
+        _getRules: getRules,
     };
 }
 

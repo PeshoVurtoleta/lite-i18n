@@ -20,7 +20,14 @@
 import { getDefaultI18n } from "./I18n.js";
 
 /** Build a per-formatter-type cache: WeakMap(opts) -> Map<locale, Intl.Formatter>,
- *  plus a shared bucket for the undefined-opts case. */
+ *  plus a shared bucket for the undefined-opts case.
+ *
+ *  Growth note: buckets retain one Intl instance per unique locale seen for
+ *  the process lifetime. Fine for a bounded locale set (the common case: a
+ *  handful of supported locales). If your process feeds arbitrary
+ *  locale strings (per-user overrides, request-scoped BCP-47 tags) into the
+ *  same factory, this grows without bound -- prefer per-request createI18n
+ *  instances so the caches die with the request. */
 function makeCache(IntlCtor) {
     const optsBuckets = new WeakMap();
     const noOptsBucket = new Map();
@@ -47,10 +54,26 @@ function makeCache(IntlCtor) {
     };
 }
 
-const getNumber       = makeCache(Intl.NumberFormat);
-const getDate         = makeCache(Intl.DateTimeFormat);
-const getList         = makeCache(Intl.ListFormat);
-const getRelativeTime = makeCache(Intl.RelativeTimeFormat);
+// Some environments (older Node, embedded runtimes, restricted browsers) may
+// ship a partial Intl. Instead of capturing an undefined constructor and
+// failing with "IntlCtor is not a constructor" at first use, wrap the
+// getters so first use throws a named, actionable error.
+function makeGuardedCache(ctor, name) {
+    if (typeof ctor === "function") return makeCache(ctor);
+    return function () {
+        throw new Error(
+            `[lite-i18n] ${name} is not available in this environment. ` +
+            `${name} is part of the Intl object; if you're targeting older ` +
+            `Node/browsers, polyfill it (e.g. @formatjs/intl-listformat or ` +
+            `@formatjs/intl-relativetimeformat) before importing this entry.`
+        );
+    };
+}
+
+const getNumber       = makeGuardedCache(Intl.NumberFormat,       "Intl.NumberFormat");
+const getDate         = makeGuardedCache(Intl.DateTimeFormat,     "Intl.DateTimeFormat");
+const getList         = makeGuardedCache(Intl.ListFormat,         "Intl.ListFormat");
+const getRelativeTime = makeGuardedCache(Intl.RelativeTimeFormat, "Intl.RelativeTimeFormat");
 
 // ---------- Convenience form ----------
 
