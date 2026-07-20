@@ -317,16 +317,15 @@ test("prototype-chain param keys do not leak (constructor / __proto__)", () => {
 });
 
 test("unsupported ICU argument at define time throws SyntaxError", () => {
-    // Silent empty-string rendering of {n, number}, {d, date, short},
-    // {gender, select, ...} etc. was the worst kind of translator footgun --
-    // no signal that the shape was unsupported. Fail loudly at compile time.
+    // Silent empty-string rendering of {n, number}, {d, date, short}, etc.
+    // was the worst kind of translator footgun -- no signal that the shape
+    // was unsupported. Fail loudly at compile time. Note: v1.1 adds select
+    // and selectordinal, so those no longer belong in the reject set.
     const i = createI18n();
     assert.throws(() => i.defineMessages("en", { m: "{n, number}" }), SyntaxError);
     assert.throws(() => i.defineMessages("en", { m: "Due {d, date, short}" }), SyntaxError);
-    assert.throws(
-        () => i.defineMessages("en", { m: "{g, select, male {He} other {They}}" }),
-        SyntaxError
-    );
+    assert.throws(() => i.defineMessages("en", { m: "{n, number, ::currency/EUR}" }), SyntaxError);
+    assert.throws(() => i.defineMessages("en", { m: "{n, choice, 0#no|1#one|2#{count}}" }), SyntaxError);
 });
 
 test("top-level '#' dequotes the same way as inside plural sub-templates", () => {
