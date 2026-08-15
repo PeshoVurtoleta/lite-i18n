@@ -16,6 +16,9 @@
 
 import { signal } from "@zakkster/lite-signal";
 
+// Three-place version sync: package.json, this const, and llms.txt move together.
+export const VERSION = "1.1.3";
+
 // ---------- Token types ----------
 // 0: literal string
 // 1: {key} interpolation slot

@@ -2,6 +2,95 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.1.3 -- 2026-08-15 (instrumentation)
+
+Instrumentation-only. No change to the read, compile, or dispatch paths; the
+sole source edit to `I18n.js` is the added `VERSION` export.
+
+### Added
+
+- **`VERSION` export** from `I18n.js` (I-11). Three-place version sync now
+  holds: `package.json`, the `VERSION` const, and `llms.txt` move together.
+- **Torture suite** (`test/torture.mjs`, `npm run torture`): ten tiers on the
+  lite-bvh shape. This session wires T0 (metamorphic laws), T1 (degenerate
+  params + counts, with the I-08/I-09 answers pinned), T3 (compile storm +
+  fail-loud corpus + define-atomicity), T6 (the allocation gate), T7 (soak +
+  cache conservation), and T9 (controls). T2/T4/T5/T8 are registered empty for
+  later sessions. `node --expose-gc test/torture.mjs` prints exactly `ok`.
+- **The allocation gate settled** (`decisions/0001-measurement.md`). Which
+  instrument answers which question, each proven against a control that must
+  fail it:
+  - **Q1 retention** -- `measureAllocs`, `maxBytesPerCall: 0`. The five pure
+    reads retain nothing; a `keep.push({a:1})` control reports 32 B/call and
+    fails.
+  - **Q2 transient** -- minor-GC (scavenge) count per 1M ops under a PINNED
+    new-space (`torture.mjs` re-execs with `--min-semi-space-size` ==
+    `--max-semi-space-size`, which makes the count bit-identical across reps on
+    one machine -- zero within-fingerprint variance, ~+/-1 cross-observer -- and
+    position-independent through the tier sequence), in an isolated `GcProfiler`
+    window. Committed per-shape ceilings in `test/torture/baseline.json`
+    (measured: static/select 0, slot 23, plural/selectordinal 46; ceilings are
+    measured+4) plus the `plural()` calibration number (100 scavenges/1M,
+    ceiling 104) -- the instrument seeing the known-allocating function at
+    `I18n.js:650`. The gate resolves the smallest realistic regression (one
+    un-hoisted per-call object) as +8 scavenges/1M and fails it. Two earlier
+    drafts were wrong -- one concluded Q2 was ungateable "by escape analysis"
+    (the object is genuinely allocated; the sampler was under-sampling), the
+    other recorded the numbers at default flags (~half these, and
+    position-dependent). The corrected story is in the decision record.
+  - **Q3 pause** -- `checkNoGc`, `maxMajor: 0`, `maxPauseMs: 4` over 1e6 `t()`.
+- **Size gate** (`test/size.mjs`, `npm run size`, I-13): fails if the gzipped
+  source of `I18n.js` or `Format.js` exceeds its budget.
+- **Known-issue reproductions** as `todo` tests (`test/09-known-issues.test.mjs`)
+  for I-01, I-03, I-05. Each asserts the post-fix expectation and flips green
+  when the owning session fixes it.
+
+### Known issues (recorded, not fixed this release)
+
+- **I-01 (S1): prototype pollution can select a plural/select variant.** The
+  `select` selector and the plural/selectordinal variable are bare
+  `params[t.variable]` reads with no `Object.hasOwn` guard, so
+  `Object.prototype.gender = 'male'` flips `"They"` to `"He"`. Fixed in I1
+  (v1.1.4).
+- **I-03 (S1): `ready()` exhausts the lite-signal node pool.** Each distinct
+  locale string caches a signal permanently; on the installed lite-signal 1.4.0
+  the shared pool (capacity 1024) throws `CapacityError` at ~1018 distinct
+  strings, after which `createI18n()` itself throws, process-wide. Locale
+  strings are untrusted input. Fixed in I2 (v1.2.0).
+- **I-05 (S2): `loadLocale` silently overwrites a later `defineMessages`.** An
+  in-flight load resolving after an explicit synchronous define wins the write,
+  across the await boundary, with no signal. Fixed in I3 (v1.2.1).
+- **I-15 (S2): `plural()` silently drops the count on a nested template.**
+  `compileString` scans top-level tokens only for the plural variable
+  (`I18n.js:396-403`); when the outer token is a `select`, the scan misses the
+  inner plural, so `plural('nest', 3, {g:'male'})` merges the count under
+  `"count"` instead of the real variable and renders `"He has  apples"` instead
+  of `"He has 3 apples"`. **The torture suite caught this on its very first run**
+  -- the harness earning its keep before it had a single green pass. Same
+  compile-time-scan family as I-08; fixed in I3 (v1.2.1). Pinned as a scoped
+  known-failing case in torture T0 so the gate stays green and the regression is
+  named, not deleted.
+- **I-14 (S3): the lite-leak retention tier is deferred to I2.** Every
+  published `@zakkster/lite-leak` (>=1.5.0) peer-requires
+  `@zakkster/lite-signal >=1.5.0-beta.3`; lite-signal's latest is 1.4.3 (installed
+  1.4.0), so no installable lite-leak exists today. T7 ships the
+  structural-conservation half only; the second witness (`tracker.size() === 0`)
+  lands in I2 alongside the `unloadLocale` / `clear()` eviction API it is meant
+  to observe. The deferral is visible in `test/torture/t7-soak.mjs`, not silent.
+- **Q2 instrument limits.** The scavenge-count gate reports a COUNT, not bytes;
+  its true floor is an allocation too small to move the count at all (below the
+  +8 scavenges/1M a single small per-call object costs -- Q1 backstops anything
+  that survives a collection); and the count is new-space-size-dependent, so
+  `torture.mjs` pins new-space (`--min-semi-space-size == --max-semi-space-size`)
+  for within-fingerprint bit-identical, position-independent numbers and `baseline.json` is
+  fingerprint-stamped -- a mismatch means re-measure under the SAME pin, never
+  widen a ceiling.
+- **Monomorphism law is an open question.** The `entry()` call site takes four
+  compiled closure shapes today; V8 goes megamorphic at five. A throughput
+  ratio cannot witness the transition (it is dominated by per-message work, and
+  the sixth-shape control moves it the wrong way), so the T6 monomorphism check
+  ships as a recorded `todo` pending a direct IC-state instrument.
+
 ## 1.1.1 -- 2026-07-19 (review fixes)
 
 ### Fixed

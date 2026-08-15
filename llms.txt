@@ -129,6 +129,24 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.1.3** (2026-08-15, instrumentation). Added a `VERSION` export (three-place
+  version sync: package.json / VERSION const / this file). Stood up the
+  `test/torture.mjs` suite (10 tiers; `npm run torture`) and a size gate
+  (`npm run size`). No behaviour change to the read/compile paths. The
+  allocation gate settled which instrument answers which question
+  (decisions/0001-measurement.md): Q1 retention via `measureAllocs`
+  (maxBytesPerCall:0), Q2 transient via minor-GC (scavenge) count per 1M ops
+  under a pinned new-space (torture.mjs re-execs with min==max semi-space for
+  bit-identical, position-independent counts) -- committed per-shape ceilings
+  and the `plural()` calibration number -- and Q3 pause via `checkNoGc`
+  (maxMajor:0, maxPauseMs:4). Known
+  issues recorded but NOT fixed this release: I-01 (prototype pollution can
+  select a plural/select variant), I-03 (`ready()` exhausts the lite-signal
+  node pool at ~1018 distinct locales), I-05 (`loadLocale` overwrites a later
+  `defineMessages`); the lite-leak retention tier is deferred (I-14: no stable
+  lite-signal >=1.5.0 to satisfy lite-leak's peer), and the call-site
+  monomorphism law is an open question (a throughput ratio cannot witness it).
+
 - **1.1.1** (2026-07-19, review fixes). Fixed `plural(key, count, params)`
   silently returning wrong strings on inline templates whose plural
   variable wasn't `count` (e.g. `{n, plural, ...}`) -- compiler now tags
