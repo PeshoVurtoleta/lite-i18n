@@ -27,8 +27,17 @@ export interface MessageDict {
     [key: string]: MessageValue;
 }
 
-/** Parameters passed to `t` and `plural`. Values are stringified on splice. */
-export type MessageParams = Record<string, string | number | bigint | boolean>;
+/**
+ * Parameters passed to `t` and `plural`. Values are stringified on splice.
+ *
+ * `bigint` is intentionally NOT in this union (I-17, v1.1.4). A bigint renders
+ * fine in a `{slot}`, but a bigint reaching a plural/selectordinal variable
+ * throws `TypeError: Cannot convert a BigInt value to a number` out of
+ * `Intl.PluralRules.select`. The type was narrowed rather than coercing at the
+ * selector, because coercion is entangled with the (separate) `=N`-vs-category
+ * string-count asymmetry. Convert bigints yourself: `t(k, { n: Number(big) })`.
+ */
+export type MessageParams = Record<string, string | number | boolean>;
 
 export interface I18nConfig {
     /** Initial locale. Default `"en"`. */
@@ -125,6 +134,13 @@ export function setDefaultI18n(inst: I18n): void;
 export function getDefaultI18n(): I18n;
 
 // ---------- Top-level helpers (default instance) ----------
+
+/**
+ * Package version. Part of the suite's version sync (package.json, the `VERSION`
+ * const in `I18n.js`, `llms.txt`, and this declaration). Kept in the `.d.ts` so
+ * `tsc` consumers see the same symbol the runtime exports (I-16, v1.1.4).
+ */
+export const VERSION: string;
 
 /** Current locale of the default instance. ESM live binding -- reassigned by `setDefaultI18n`. */
 export let locale: Signal<string>;

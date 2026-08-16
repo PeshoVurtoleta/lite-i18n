@@ -275,9 +275,14 @@ well-predicted branch per slot and prevents `"undefined"` from bleeding into
 the DOM. Numeric zero (`0`) and empty string (`""`) render normally --
 they're not nullish.
 
-Slot reads use `Object.hasOwn`, so `{constructor}` won't leak the native
-`Object` function and `{__proto__}` won't leak the prototype object -- they
-just render as empty string like any other unpassed slot.
+Every read site uses `Object.hasOwn` -- not only the `{slot}`, but the `#`
+inside a plural variant, the `{var, plural, ...}` / `{var, selectordinal, ...}`
+variable, the `{var, select, ...}` variable, and the plural-object `count`. So
+`{constructor}` won't leak the native `Object` function, `{__proto__}` won't
+leak the prototype object, and `Object.prototype` can never decide which variant
+renders: a prototype-chain identifier renders as empty string (slot) or selects
+the `other` variant (selector), exactly like any unpassed key. (Before 1.1.4 the
+selector reads were unguarded -- see the CHANGELOG, I-01.)
 
 If you need strict-check behavior (throw or warn on missing slot), do it in
 a validation pass at define time; the render loop stays cheap.

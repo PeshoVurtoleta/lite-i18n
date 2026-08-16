@@ -24,7 +24,7 @@ only after the control breaks.
 
 ## The calibration case (the session's falsifier)
 
-`plural()` allocates one object per call, by design, at `I18n.js:650`:
+`plural()` allocates one object per call, by design, at `I18n.js:659`:
 
 ```js
 const p = params ? { ...params, [varName]: count } : { [varName]: count };
@@ -140,7 +140,7 @@ cross-observer):
 
 The calibration case is MET: the instrument sees the known-allocating function,
 and `plural()` at 100 is ~2.2x `t plural` at 46 -- exactly the extra
-`{...params, count}` object at `I18n.js:650` riding on top of the same returned
+`{...params, count}` object at `I18n.js:659` riding on top of the same returned
 string. And it reproduces the package law: `static` and `select` read as
 EXACTLY 0 (both return a pre-existing interned literal with no substitution);
 the non-zero rows are the returned string, which the law explicitly permits
@@ -166,7 +166,7 @@ Allocation-stack sampler. It DOES see the object (transient control samples
 for small, quickly-dead objects -- 0 to tens of KB across runs at the same
 interval -- so it cannot produce a stable, reproducible per-op number, and
 cannot be gated at a fixed threshold without flaking. Useful for attribution
-(it names `I18n.js:403`, the compiled entry), not as a gate. Rejected as a
+(it names `I18n.js:413`, the compiled entry), not as a gate. Rejected as a
 gate; retained as a diagnostic.
 
 ### Candidate 3 -- minor-GC (scavenge) count -- ACCEPTED (pinned form)

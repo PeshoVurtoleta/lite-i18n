@@ -289,30 +289,176 @@ test("torture: Symbol-keyed params values are inaccessible via slot name", () =>
     assert.equal(i.t("m", params), "Hi STRING");
 });
 
-test("torture: {__proto__} does not leak Object.prototype (hasOwn guard)", () => {
-    const i = createI18n();
-    i.defineMessages("en", { m: "{__proto__}" });
-    assert.equal(i.t("m", {}), "");
-    // But explicit own-property is honored.
-    const params = Object.create(null);
-    params.__proto__ = "explicit";
-    assert.equal(i.t("m", params), "explicit");
+// I-02: these two tests replace slot-only pollution tests that stayed green
+// across two minor versions while Object.prototype decided which SENTENCE
+// rendered (I-01). Every read site is exercised by name below -- type-1 slot,
+// the type-2 plural/selectordinal variable (I18n.js:354), the type-3 select
+// variable (:367), and the plural-object count (:462). Do NOT shrink these back
+// to slots: a pollution test that does not touch a selector read is a green
+// light over the exact hole this session was convened to close.
+test("torture: Object.prototype pollution does not choose the variant at ANY read site (I-01/I-02)", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        // type-1 slot -- hasOwn guard was already correct (the model to copy).
+        slot: "Hi, {name}",
+        // type-3 select variable, read at I18n.js:367.
+        sel: "{gender, select, male {He} female {She} other {They}}",
+        // type-2 plural variable, read at I18n.js:354. `#` is a guarded slot,
+        // so the polluted plural renders a sentence with no number in it.
+        plu: "{count, plural, one {# item} other {# items}}",
+        // type-2 selectordinal variable, read at I18n.js:354.
+        ord: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
+        // plural-object count, read at I18n.js:462 (the TMS-export shape).
+        obj: { one: "# thing", other: "# things" },
+        // nested select>plural -- both the outer select and the inner plural
+        // variable must stay own-property-only under pollution.
+        nest: "{gender, select, male {He has {count, plural, one {# apple} other {# apples}}} other {Nobody}}",
+    });
+    // Clean baseline: empty own params -> every selector resolves to `other`.
+    const clean = {
+        slot: i.t("slot", {}),
+        sel: i.t("sel", {}),
+        plu: i.t("plu", {}),
+        ord: i.t("ord", {}),
+        obj: i.t("obj", {}),
+        nest: i.t("nest", {}),
+    };
+    assert.deepEqual(clean, {
+        slot: "Hi, ", sel: "They", plu: " items", ord: "th", obj: " things", nest: "Nobody",
+    }, "clean baseline changed");
+    try {
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.gender = "male";
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.count = 1;
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.n = 3;
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.name = "PWN";
+        // Every message must render byte-identically to the unpolluted run:
+        // an inherited property must never satisfy any read site.
+        assert.equal(i.t("slot", {}), clean.slot, "slot leaked Object.prototype.name");
+        assert.equal(i.t("sel", {}), clean.sel, "select variable leaked Object.prototype.gender");
+        assert.equal(i.t("plu", {}), clean.plu, "plural variable leaked Object.prototype.count");
+        assert.equal(i.t("ord", {}), clean.ord, "selectordinal variable leaked Object.prototype.n");
+        assert.equal(i.t("obj", {}), clean.obj, "plural-object count leaked Object.prototype.count");
+        assert.equal(i.t("nest", {}), clean.nest, "nested selectors leaked Object.prototype");
+    } finally {
+        delete Object.prototype.gender;
+        delete Object.prototype.count;
+        delete Object.prototype.n;
+        delete Object.prototype.name;
+    }
 });
 
-test("torture: attempted prototype pollution via params does not affect Object.prototype", () => {
-    const i = createI18n();
-    i.defineMessages("en", { m: "{k}" });
-    // Even if a user does something weird, we only READ params.
-    const params = { k: "safe" };
-    Object.defineProperty(Object.prototype, "pollute", { value: "gotcha", configurable: true });
+test("torture: inherited property never satisfies a read site; explicit own property does (all sites, I-01/I-02)", () => {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        slot: "{__proto__}",                                                 // type-1 slot
+        sel: "{gender, select, male {He} female {She} other {They}}",        // type-3 select
+        plu: "{count, plural, one {# item} other {# items}}",               // type-2 plural
+    });
+    // Own property is honored at every site.
+    const own = Object.create(null);
+    own.__proto__ = "explicit";
+    assert.equal(i.t("slot", own), "explicit", "slot must honor own __proto__");
+    assert.equal(i.t("sel", { gender: "male" }), "He", "select must honor own gender");
+    assert.equal(i.t("plu", { count: 1 }), "1 item", "plural must honor own count");
+    // Inherited property must NOT satisfy any site: the selector picks `other`,
+    // not the polluted variant. This is the assertion the pre-1.1.4 slot-only
+    // tests never made -- it fails on 1.1.3 for the two selector rows.
     try {
-        assert.equal(i.t("m", params), "safe");
-        // Confirm hasOwn guard rejects the pollution attempt on OTHER templates.
-        i.defineMessages("en", { p: "{pollute}" });
-        assert.equal(i.t("p", params), "");
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.gender = "female";
+        // eslint-disable-next-line no-extend-native
+        Object.prototype.count = 1;
+        assert.equal(i.t("slot", {}), "", "slot leaked Object.prototype");
+        assert.equal(i.t("sel", {}), "They", "select read the inherited gender");
+        assert.equal(i.t("plu", {}), " items", "plural read the inherited count");
     } finally {
-        delete Object.prototype.pollute;
+        delete Object.prototype.gender;
+        delete Object.prototype.count;
     }
+});
+
+// ============================================================================
+//  I-09 -- the read-path throw surface, one named test per row of the BRIEF
+//  table. Each row crosses the three columns that apply (slot / select /
+//  plural). These pin the ACTUAL behaviour, including the ugly ones -- a pinned
+//  TypeError is a valid contract; an unpinned throw is not.
+// ============================================================================
+
+function i09() {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        slot: "Hi, {name}",
+        sel: "{gender, select, male {He} female {She} other {They}}",
+        plu: "{count, plural, one {# item} other {# items}}",
+    });
+    return i;
+}
+
+test("I-09 row: own Symbol value -- slot TypeError, select `other`, plural TypeError", () => {
+    const i = i09();
+    // slot: string concat of a Symbol throws.
+    assert.throws(() => i.t("slot", { name: Symbol("n") }), TypeError);
+    // select: a Symbol is never a variant key -> falls through to `other`, no throw.
+    assert.equal(i.t("sel", { gender: Symbol("g") }), "They");
+    // plural: Intl.PluralRules.select(Symbol) throws.
+    assert.throws(() => i.t("plu", { count: Symbol("c") }), TypeError);
+});
+
+test("I-09 row: throwing getter on the read key propagates at every site", () => {
+    const i = i09();
+    // hasOwn sees the accessor as an own property; reading it invokes the
+    // getter, whose throw is user code and surfaces to the caller unwrapped.
+    assert.throws(() => i.t("slot", { get name() { throw new Error("boom slot"); } }), /boom slot/);
+    assert.throws(() => i.t("sel", { get gender() { throw new Error("boom sel"); } }), /boom sel/);
+    assert.throws(() => i.t("plu", { get count() { throw new Error("boom plu"); } }), /boom plu/);
+});
+
+test("I-09 row: throwing toString propagates (slot only; n/a for selectors)", () => {
+    const i = i09();
+    // The slot concatenation coerces the value via toString; its throw propagates.
+    assert.throws(() => i.t("slot", { name: { toString() { throw new Error("boom toString"); } } }), /boom toString/);
+});
+
+test("I-09 row: own BigInt value -- slot renders, plural throws (I-17: type narrowed)", () => {
+    const i = i09();
+    // A bigint stringifies cleanly in a slot.
+    assert.equal(i.t("slot", { name: 10n }), "Hi, 10");
+    // But Intl.PluralRules.select(bigint) throws. I-17 decision: NARROW the
+    // published MessageParams type to drop `bigint` rather than coerce at the
+    // selector (coercion is entangled with the out-of-scope I-08 =N/category
+    // split). Runtime keeps throwing; the declaration no longer promises bigint.
+    assert.throws(() => i.t("plu", { count: 1n }), /BigInt/i);
+});
+
+test("I-09 row: string count '1' matches the category (pinned as-is, I-08 territory)", () => {
+    const i = i09();
+    // Intl coerces the string; the `=N` exact map (keyed by number) misses but
+    // rules.select('1') returns "one". This asymmetry is I-08 (out of scope);
+    // pinned here so the fix session inherits a falsifier, not a surprise.
+    assert.equal(i.t("plu", { count: "1" }), "1 item");
+});
+
+test("I-09 row: undefined/null/string/number/array params -> slot '', select `other`, plural `other`", () => {
+    const i = i09();
+    for (const p of [undefined, null, "x", 5, []]) {
+        assert.equal(i.t("slot", p), "Hi, ", "slot with degenerate params");
+        assert.equal(i.t("sel", p), "They", "select with degenerate params");
+        assert.equal(i.t("plu", p), " items", "plural with degenerate params");
+    }
+});
+
+test("I-09 row: null-prototype own property is honored at every site", () => {
+    const i = i09();
+    const slotP = Object.create(null); slotP.name = "Z";
+    assert.equal(i.t("slot", slotP), "Hi, Z");
+    const selP = Object.create(null); selP.gender = "female";
+    assert.equal(i.t("sel", selP), "She");
+    const pluP = Object.create(null); pluP.count = 1;
+    assert.equal(i.t("plu", pluP), "1 item");
 });
 
 // ============================================================================

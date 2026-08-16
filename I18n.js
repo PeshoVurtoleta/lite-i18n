@@ -17,7 +17,7 @@
 import { signal } from "@zakkster/lite-signal";
 
 // Three-place version sync: package.json, this const, and llms.txt move together.
-export const VERSION = "1.1.3";
+export const VERSION = "1.1.4";
 
 // ---------- Token types ----------
 // 0: literal string
@@ -331,9 +331,13 @@ function compileSelectToken(variable, body) {
 // instance-scoped getter so different instances don't cross-pollute caches.
 //
 // Slot rendering coalesces nullish values (undefined, null) to "" via ??.
-// It also rejects prototype-chain reads via Object.hasOwn so a slot named
-// {constructor} or {__proto__} can't leak Object.prototype internals into
-// the output. Both checks are one well-predicted branch per slot.
+// EVERY read site rejects prototype-chain reads via Object.hasOwn -- the type-1
+// slot (type 1), the type-2 plural/selectordinal variable, the type-3 select
+// variable, and compilePluralObj's `count` read -- so a single assignment to
+// Object.prototype can never decide which variant renders, nor leak an inherited
+// value into the output. An absent own property resolves to "" (slot) or the
+// `other` variant (selector), which is what a missing param already meant. Each
+// guard is one well-predicted branch (I-01, fixed v1.1.4).
 function renderTokens(tokens, params, locale, getRules) {
     let out = "";
     const n = tokens.length;
@@ -346,7 +350,8 @@ function renderTokens(tokens, params, locale, getRules) {
             const key = t.key;
             out += Object.hasOwn(params, key) ? (params[key] ?? "") : "";
         } else if (type === 2) {
-            const nVal = params[t.variable];
+            const vkey = t.variable;
+            const nVal = Object.hasOwn(params, vkey) ? params[vkey] : undefined;
             const ex = t.exact.get(nVal);
             if (ex !== undefined) {
                 out += renderTokens(ex, params, locale, getRules);
@@ -358,7 +363,8 @@ function renderTokens(tokens, params, locale, getRules) {
             }
         } else {
             // type 3: select -- string-keyed dispatch, no PluralRules
-            const key = params[t.variable];
+            const vkey = t.variable;
+            const key = Object.hasOwn(params, vkey) ? params[vkey] : undefined;
             const variant = t.variants.get(key) || t.variants.get("other");
             out += renderTokens(variant, params, locale, getRules);
         }
@@ -453,7 +459,7 @@ function compilePluralObj(obj) {
     }
     const fn = function (params, locale, getRules) {
         const p = params || EMPTY_PARAMS;
-        const nVal = p.count;
+        const nVal = Object.hasOwn(p, "count") ? p.count : undefined;
         const ex = exact.get(nVal);
         if (ex !== undefined) return renderTokens(ex, p, locale, getRules);
         const rules = getRules(locale);

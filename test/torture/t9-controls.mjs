@@ -21,12 +21,18 @@
  *                        must read as conserved.
  *   5.  fail-loud     -- a plural missing 'other' must throw at define; a valid
  *                        template must not.
+ *   6.  selector-guard-- reverting ONE of the three I-01 hasOwn guards (the
+ *                        type-3 select read, I18n.js:367) must make T2's identity
+ *                        property fail: an inherited Object.prototype.gender then
+ *                        changes the rendered variant. The shipped guarded read
+ *                        must keep the property (inherited -> `other`).
  *
- * `node --expose-gc test/torture.mjs` runs all six every time, so a plain
- * torture run already proves the gates bite (6/6 -> tier passes silently).
- * `I18N_TORTURE_BREAK=1 ...` requires 6/6 and then exits non-zero to signal the
+ * `node --expose-gc test/torture.mjs` runs all seven every time, so a plain
+ * torture run already proves the gates bite (7/7 -> tier passes silently).
+ * `I18N_TORTURE_BREAK=1 ...` requires 7/7 and then exits non-zero to signal the
  * control run -- the "exits non-zero on each control" contract (a second Q2
- * control was added on review, so the count is 6, not the brief's original 5).
+ * control and the I1 selector-guard control were added on review, so the count
+ * is 7, not the brief's original 5).
  */
 
 import { readFileSync } from "node:fs";
@@ -123,8 +129,61 @@ function control5() {
     return badThrew && !goodThrew;
 }
 
+// Control 6 -- reverting the I-01 hasOwn guards must make T2's identity property
+// fail. T2 asserts that rendering under an inherited Object.prototype property is
+// byte-identical to the unpolluted render.
+//
+// Direction B reverts the guards in the REAL library code, not in a replica.
+// All three guarded selector reads (I18n.js:354 type-2, :367 type-3, :462
+// plural-object) funnel through the same primitive, so stubbing Object.hasOwn to
+// `() => true` restores the exact 1.1.3 fail-open behaviour at all three sites at
+// once, inside the shipped renderTokens -- no hand-rolled stand-in that could
+// drift from the code it claims to model. An earlier draft of this control
+// compared against a local Map replica; that version could have passed with the
+// library fully broken, which is the I-02 pathology this session exists to kill.
+// Do not reintroduce it.
+function control6() {
+    const i = createI18n({ locale: "en" });
+    i.defineMessages("en", {
+        sel: "{gender, select, male {He} female {She} other {They}}",
+        plr: "{count, plural, one {# item} other {# items}}",
+        obj: { one: "# thing", other: "# things" },
+    });
+    const shot = () => i.t("sel", {}) + "|" + i.t("plr", {}) + "|" + i.t("obj", {});
+    const clean = shot(); // "They| items| things" -- no own properties anywhere
+    const pollute = () => {
+        Object.prototype.gender = "male";
+        Object.prototype.count = 1;
+    };
+    const unpollute = () => {
+        delete Object.prototype.gender;
+        delete Object.prototype.count;
+    };
+    // Direction A: the shipped GUARDED reads hold the identity property.
+    let guardedHeld;
+    try {
+        pollute();
+        guardedHeld = shot() === clean; // identity holds at all three sites
+    } finally {
+        unpollute();
+    }
+    // Direction B: the guards REVERTED in real library code -- the identity gate
+    // must catch the break at every site.
+    const realHasOwn = Object.hasOwn;
+    let brokenCaught;
+    try {
+        pollute();
+        Object.hasOwn = () => true; // fail open, exactly as 1.1.3 did
+        brokenCaught = shot() !== clean; // "He|1 item|1 thing" !== clean
+    } finally {
+        Object.hasOwn = realHasOwn;
+        unpollute();
+    }
+    return guardedHeld && brokenCaught;
+}
+
 export async function run() {
-    const labels = ["1 Q1-retention", "2 Q2-large", "2b Q2-minimal", "3 Q3-pause", "4 conservation", "5 fail-loud"];
+    const labels = ["1 Q1-retention", "2 Q2-large", "2b Q2-minimal", "3 Q3-pause", "4 conservation", "5 fail-loud", "6 selector-guard"];
     const results = [
         control1(),
         await control2(),
@@ -132,6 +191,7 @@ export async function run() {
         await control3(),
         control4(),
         control5(),
+        control6(),
     ];
     const N = results.length;
     let caught = 0;

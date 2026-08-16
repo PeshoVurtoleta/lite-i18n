@@ -2,6 +2,66 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.1.4 -- 2026-08-15 (security fix)
+
+### Fixed
+
+- **I-01 (security-relevant): `Object.prototype` could choose which variant
+  rendered.** The type-1 slot read was guarded by `Object.hasOwn`, but the three
+  SELECTOR reads were bare `params[key]`: the `{var, plural, ...}` /
+  `{var, selectordinal, ...}` variable, the `{var, select, ...}` variable, and
+  the plural-object `count`. So a single assignment to `Object.prototype` changed
+  the SENTENCE that rendered, not a value inside it -- `Object.prototype.gender =
+  "male"` turned `"They"` into `"He"`; `.count = 1` turned `" items"` into
+  `" item"` (with no number, since `#` is a guarded slot, making the corruption
+  harder to spot). **Plural-object entries -- the TMS-export shape -- were
+  affected too.** This shipped in 1.1.2 and 1.1.3. Fixed with one `Object.hasOwn`
+  per selector read (the same well-predicted branch a slot already pays); an
+  absent selector resolves to the `other` variant, unchanged from before -- a fix
+  with no new policy. Every own-property call renders byte-identically to before.
+  The Q2 allocation ceilings are unmoved (the guard reads an own property and
+  allocates nothing; `select` stayed at 0 scavenges/1M). See
+  `decisions/0002-selector-reads.md`.
+- **I-02: the prototype-pollution tests that named the hazard now exercise it.**
+  `test/08-torture.test.mjs`'s two pollution tests tested only type-1 slots and
+  stayed green across two minor versions while I-01 shipped. They now cross every
+  read site (slot, select, plural, selectordinal, plural-object, and a nested
+  composition). Both failed on 1.1.3 and pass on 1.1.4; the pre-fix failure
+  output is recorded in the session notes. The full 6x4 identity matrix (six read
+  sites x own / inherited / null-proto / Proxy) is pinned in
+  `test/torture/t2-identity.mjs` (T2), and T9 gains a control (control 6) that
+  reverts one guard and asserts T2 catches it.
+
+### Changed
+
+- **I-17: the published `MessageParams` type drops `bigint`.** A bigint renders
+  in a `{slot}` (`10n -> "10"`) but throws `TypeError: Cannot convert a BigInt
+  value to a number` out of `Intl.PluralRules.select` when it reaches a plural
+  variable. The declaration and the runtime disagreed. The type was narrowed
+  (`Record<string, string | number | boolean>`) rather than coercing at the
+  selector, because coercion is entangled with the out-of-scope I-08
+  `=N`-vs-category string-count asymmetry and would be a hot-body change. Runtime
+  behaviour is unchanged (bigint count still throws, pinned by test); only the
+  type moved. Reasoning in `decisions/0002-selector-reads.md`.
+- **I-09: the read-path throw surface is pinned.** One named test per row in
+  `test/08-torture.test.mjs`: own Symbol value (slot `TypeError`, select `other`,
+  plural `TypeError`), throwing getter (propagates at every site), throwing
+  `toString` (propagates, slot only), own BigInt (slot renders, plural throws),
+  string `count: "1"` (matches `one`, I-08 territory pinned as-is),
+  `undefined`/`null`/string/number/array params (slot `""`, selectors `other`),
+  and null-prototype own property (honoured everywhere).
+
+### Added
+
+- **I-16: `VERSION` is declared in `I18n.d.ts`.** I0 exported `VERSION` from the
+  runtime but the declaration file never had it, so `tsc` consumers could not see
+  it and the three-place version sync was two places for anyone on types. Added
+  `export const VERSION: string;` and a version-sync test
+  (`test/10-version-sync.test.mjs`, run under `npm test` / `npm run verify`) that
+  asserts the runtime `VERSION` equals `package.json`, the `.d.ts` declares the
+  symbol, and `llms.txt` carries the string -- so the gap cannot reopen at the
+  next bump.
+
 ## 1.1.3 -- 2026-08-15 (instrumentation)
 
 Instrumentation-only. No change to the read, compile, or dispatch paths; the
@@ -32,7 +92,7 @@ sole source edit to `I18n.js` is the added `VERSION` export.
     (measured: static/select 0, slot 23, plural/selectordinal 46; ceilings are
     measured+4) plus the `plural()` calibration number (100 scavenges/1M,
     ceiling 104) -- the instrument seeing the known-allocating function at
-    `I18n.js:650`. The gate resolves the smallest realistic regression (one
+    `I18n.js:659`. The gate resolves the smallest realistic regression (one
     un-hoisted per-call object) as +8 scavenges/1M and fails it. Two earlier
     drafts were wrong -- one concluded Q2 was ungateable "by escape analysis"
     (the object is genuinely allocated; the sampler was under-sampling), the
@@ -62,7 +122,7 @@ sole source edit to `I18n.js` is the added `VERSION` export.
   across the await boundary, with no signal. Fixed in I3 (v1.2.1).
 - **I-15 (S2): `plural()` silently drops the count on a nested template.**
   `compileString` scans top-level tokens only for the plural variable
-  (`I18n.js:396-403`); when the outer token is a `select`, the scan misses the
+  (`I18n.js:407-412`); when the outer token is a `select`, the scan misses the
   inner plural, so `plural('nest', 3, {g:'male'})` merges the count under
   `"count"` instead of the real variable and renders `"He has  apples"` instead
   of `"He has 3 apples"`. **The torture suite caught this on its very first run**

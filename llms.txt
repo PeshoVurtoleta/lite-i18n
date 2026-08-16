@@ -129,6 +129,26 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.1.4** (2026-08-15, security fix). I-01: prototype pollution could choose
+  which variant rendered. The type-1 slot was `Object.hasOwn`-guarded, but the
+  three selector reads were bare `params[key]` -- the `{var, plural, ...}` /
+  `{var, selectordinal, ...}` variable (I18n.js:354), the `{var, select, ...}`
+  variable (:367), and the plural-object `count` (:462). A single
+  `Object.prototype.gender = "male"` flipped `"They"` to `"He"`; `.count = 1`
+  flipped `" items"` to `" item"` (with no number, since `#` is a guarded slot).
+  Shipped in 1.1.2 and 1.1.3. Fixed with one `Object.hasOwn` per selector read
+  (the same branch a slot already pays); an absent selector resolves to `other`,
+  unchanged from before. I-02: the two prototype-pollution tests that stayed
+  green over the bug now exercise every read site (`test/08-torture.test.mjs`)
+  and the full identity matrix lands in `test/torture/t2-identity.mjs`. I-16:
+  `VERSION` is now declared in `I18n.d.ts` and a version-sync test
+  (`test/10-version-sync.test.mjs`) keeps the `.d.ts` in the sync set. I-17: the
+  published `MessageParams` type drops `bigint` -- a bigint renders in a slot but
+  throws out of `Intl.PluralRules.select`, so the declaration was narrowed rather
+  than coercing at the selector (decisions/0002-selector-reads.md). Q2 allocation
+  ceilings unmoved (`select` stayed at 0 scavenges/1M; the guard reads an own
+  property and allocates nothing).
+
 - **1.1.3** (2026-08-15, instrumentation). Added a `VERSION` export (three-place
   version sync: package.json / VERSION const / this file). Stood up the
   `test/torture.mjs` suite (10 tiers; `npm run torture`) and a size gate
@@ -327,9 +347,13 @@ Constraints enforced at compile time:
 Runtime coercion:
 - Nullish (`undefined` or `null`) slot values render as `""` (nullish coalesce
   on the hot path). Numeric zero and empty string render normally.
-- Slot reads use `Object.hasOwn`, so `{constructor}`, `{__proto__}`, and
-  other prototype-chain identifiers render as `""` unless supplied as own
-  properties on `params`.
+- EVERY read site uses `Object.hasOwn`, not just slots: the `{slot}`, the `#`
+  inside a plural variant, the `{var, plural, ...}` / `{var, selectordinal, ...}`
+  variable, the `{var, select, ...}` variable, and the plural-object `count`. So
+  `{constructor}`, `{__proto__}` and any other prototype-chain identifier render
+  as `""` (slot) or select the `other` variant (selector) unless supplied as an
+  own property on `params`. `Object.prototype` can never decide which variant
+  renders -- prior to 1.1.4 the selector reads were unguarded (I-01).
 - `defineMessages` is atomic: templates compile into a staging Map first,
   committed only on success. A bad template mid-dict throws without leaving
   a partial update.

@@ -8,7 +8,7 @@
 // without editing the pin here. Do not weaken a pin; flip it when you fix the
 // code in the session that owns it.
 //
-//   I-01 -> I1 (v1.1.4)   prototype pollution selects the variant
+//   I-01 -> FIXED in I1 (v1.1.4)   prototype pollution no longer selects a variant
 //   I-03 -> I2 (v1.2.0)   ready() exhausts the lite-signal node pool
 //   I-05 -> I3 (v1.2.1)   loadLocale overwrites a later defineMessages
 
@@ -16,28 +16,30 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createI18n } from "../I18n.js";
 
-// I-01 (S1). Type-1 slots are hasOwn-guarded; the select selector
-// (I18n.js:358) and the plural/selectordinal variable (:346) are bare
-// params[t.variable] reads, so Object.prototype decides which SENTENCE renders.
-test("I-01: prototype pollution selects a variant (I1 must flip this)", () => {
+// I-01 (S1, FIXED v1.1.4). Every read site is now hasOwn-guarded: the type-1
+// slot, the type-2 plural/selectordinal variable (I18n.js:354), the type-3
+// select variable (:367) and compilePluralObj's count (:462). Object.prototype
+// can no longer decide which SENTENCE renders. This pin was flipped from "He"
+// (the reproduced bug on 1.1.2/1.1.3) to "They" (the fix); the full matrix
+// lives in test/torture/t2-identity.mjs and test/08-torture.test.mjs.
+test("I-01: prototype pollution no longer selects a variant (fixed v1.1.4)", () => {
     const i = createI18n({ locale: "en" });
     i.defineMessages("en", { g: "{gender, select, male {He} female {She} other {They}}" });
     assert.equal(i.t("g", {}), "They", "unpolluted baseline changed");
     try {
         // eslint-disable-next-line no-extend-native
         Object.prototype.gender = "male";
-        // PINNED BUG: an inherited property chooses the sentence. When I1 adds
-        // the hasOwn guard, this becomes "They" -- flip the expectation then.
+        // The hasOwn guard rejects the inherited property: `other` still renders.
         assert.equal(
-            i.t("g", {}), "He",
-            "I-01 no longer reproduces: I1 (v1.1.4) fixed the selector guard -- flip this pin to 'They'");
+            i.t("g", {}), "They",
+            "I-01 regression: an inherited Object.prototype.gender chose the variant again");
     } finally {
         delete Object.prototype.gender;
     }
 });
 
 // I-03 (S1). ready() lazily creates and permanently caches one lite-signal per
-// distinct locale string (I18n.js:678). On the installed lite-signal 1.4.0 the
+// distinct locale string (I18n.js:684). On the installed lite-signal 1.4.0 the
 // shared node pool (capacity 1024) throws CapacityError at ~1018 distinct
 // strings, and then createI18n() itself throws -- process-wide, across every
 // lite-* package sharing the pool. Locale strings ARE untrusted input.
