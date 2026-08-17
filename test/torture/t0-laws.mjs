@@ -70,7 +70,7 @@ export async function run() {
 
     // KNOWN-FAILING, scoped (I-15, S2): the plural()-merge form of the SAME
     // nesting does NOT hold today. compileString scans TOP-LEVEL tokens only for
-    // the plural variable (I18n.js:407-412); in a nested template the top-level
+    // the plural variable (see compileString's pluralVar scan); in a nested template the top-level
     // token is the select, so the scan finds nothing, pluralVar stays null, and
     // plural() merges the count under "count" instead of "n" -- the inner # then
     // reads an absent param and renders "". This law will hold after I3 fixes

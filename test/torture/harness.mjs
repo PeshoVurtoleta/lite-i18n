@@ -167,3 +167,18 @@ export function conserved(inst, expectLocales) {
         s.pluralRulesCached <= expectLocales &&
         s.ordinalRulesCached <= expectLocales;
 }
+
+/**
+ * The I2 bound (decisions/0003-locale-bounds.md). Unlike `conserved` -- which
+ * ties the rules caches to the LIVE locale set -- the rules caches are memos of
+ * the REQUESTED locale, which can exceed the live set whenever a fallback chain
+ * resolves an untrusted locale. The correct invariant is therefore that every
+ * per-locale cache stays <= the per-instance ceiling `max`, reading the three
+ * cache counters `stats()` exposes. Returns true iff all three are bounded.
+ */
+export function withinLocaleBounds(inst, max) {
+    const s = inst.stats();
+    return s.pluralRulesCached <= max &&
+        s.ordinalRulesCached <= max &&
+        s.readySignalsCached <= max;
+}

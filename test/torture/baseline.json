@@ -1,6 +1,6 @@
 {
   "schema": "lite-i18n-torture-baseline/1",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "instrument": "minor-gc scavenges per 1000000 ops under a PINNED new-space (--min-semi-space-size=1 --max-semi-space-size=1); see decisions/0001-measurement.md, Q2",
   "note": "Q2 transient ceilings, in scavenges/1M ops. Pinning new-space (min==max) makes the count bit-identical across reps on ONE machine (zero within-fingerprint variance) and position-independent through the tier sequence. Cross-machine/cross-observer readings jitter about +/-1 (e.g. plural() 99 vs 100), which the captureFingerprint stamp guards -- treat a 1-unit drift on a matching fingerprint as noise, not a regression. Ceilings are measured+4 (a small absolute margin), not a multiple, because there is no within-fingerprint spread to buy tolerance for. The smallest realistic regression -- one small object per call, consumed by a string read -- costs about +8 scavenges/1M, so a margin of 4 catches it. A fingerprint mismatch means re-measure under the SAME pin, never widen a ceiling.",
   "fingerprint": {

@@ -21,16 +21,18 @@ import { check, conserved } from "./harness.mjs";
 const CYCLES = 4096;
 
 // ---------------------------------------------------------------------------
-// I-14: the lite-leak retention witness is DEFERRED to I2, on purpose.
+// I-14: the lite-leak retention witness is STILL DEFERRED (re-checked at I2).
 //
-// @zakkster/lite-leak >=1.5.0 peer-requires @zakkster/lite-signal >=1.5.0-beta.3;
-// lite-signal's latest is 1.4.3 and the installed version is 1.4.0, so no
-// lite-leak that this package can install exists today. It is NOT in
-// devDependencies and NOT imported here. I2 (v1.2.0) lands unloadLocale /
-// clear() -- the eviction API lite-leak is meant to witness -- by which point
-// a compatible lite-signal is expected. Until then T7 ships the
-// structural-conservation half only, and the gap is this comment plus the
-// CHANGELOG known-issues entry, not a missing import that reads as an oversight.
+// Re-run at v1.2.0 (2026-08-16): `npm i -D @zakkster/lite-leak` still fails
+// ERESOLVE. The current @zakkster/lite-leak@1.8.1 peer-requires
+// @zakkster/lite-signal ">=1.5.0-beta.3 <2.0.0"; lite-signal's registry latest
+// is 1.4.3 (installed 1.4.0) and no 1.5.x exists, so the peer cannot be
+// satisfied. lite-leak is NOT in devDependencies and NOT imported. I2 landed the
+// eviction API (unloadLocale / clear) the retention witness is meant to observe,
+// but the witness itself waits on a compatible lite-signal. Until then T7 ships
+// the structural-conservation half only (extended below to the new stats fields
+// and an unloadLocale churn), plus the T4/T8 pool-budget assertions; the gap is
+// this comment and the CHANGELOG known-issues entry, not a silent omission.
 // ---------------------------------------------------------------------------
 
 export async function run() {
@@ -60,11 +62,26 @@ export async function run() {
         // the read/define/switch loop leaves the caches conserved).
         inst.locale.set("en");
 
+        // Eviction churn: define a TRANSIENT locale, read it, then unloadLocale
+        // it -- so the retire path runs 4096 times and must leave the live set
+        // back at exactly {en}. This witnesses that unloadLocale actually
+        // releases (I-12), not merely marks.
+        inst.defineMessages("tmp", { z: "t" + c + " {v}" });
+        sink = inst.t("z", { v: c }); // active is en (no 'z'); tmp is not in the chain, so this is the literal "z"
+        const removed = inst.unloadLocale("tmp");
+        check(removed === true, () => "T7: cycle " + c + " unloadLocale('tmp') did not remove");
+
         // Conservation after EVERY cycle: one locale, one cardinal rules entry,
         // no ordinal rules (no selectordinal read), nothing unbounded.
         check(conserved(inst, 1),
             () => "T7: cycle " + c + " conservation violated -- " +
                 JSON.stringify(inst.stats()));
+        // The new I2 counters stay coherent: no ready signals were minted, and
+        // retiredLocales tracks the unloads exactly.
+        check(inst.stats().readySignalsCached === 0,
+            () => "T7: cycle " + c + " minted a phantom ready signal");
+        check(inst.stats().retiredLocales === c + 1,
+            () => "T7: cycle " + c + " retiredLocales " + inst.stats().retiredLocales + " != " + (c + 1));
     }
 
     // Final structural assertions, spelled out so a regression names itself.

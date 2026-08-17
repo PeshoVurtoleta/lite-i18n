@@ -2,9 +2,10 @@
  * T2 -- the identity matrix (this package's A-07). Filled by I1 (v1.1.4).
  *
  * Six read sites x four property provenances. This is where I-01 lived: the
- * select variable (I18n.js:367), the plural/selectordinal variable (:354) and
- * the plural-object count (:462) were bare `params[key]` reads with no
- * Object.hasOwn guard, so Object.prototype decided which variant rendered.
+ * select variable, the plural/selectordinal variable (both in `renderTokens`)
+ * and the plural-object count (in `compilePluralObj`) were bare `params[key]`
+ * reads with no Object.hasOwn guard, so Object.prototype decided which variant
+ * rendered.
  * v1.1.4 adds one hasOwn per selector read -- the same well-predicted branch a
  * slot already pays -- and this tier pins the whole matrix.
  *

@@ -292,8 +292,8 @@ test("torture: Symbol-keyed params values are inaccessible via slot name", () =>
 // I-02: these two tests replace slot-only pollution tests that stayed green
 // across two minor versions while Object.prototype decided which SENTENCE
 // rendered (I-01). Every read site is exercised by name below -- type-1 slot,
-// the type-2 plural/selectordinal variable (I18n.js:354), the type-3 select
-// variable (:367), and the plural-object count (:462). Do NOT shrink these back
+// the type-2 plural/selectordinal variable and the type-3 select variable (both
+// in renderTokens), and the plural-object count (in compilePluralObj). Do NOT shrink these back
 // to slots: a pollution test that does not touch a selector read is a green
 // light over the exact hole this session was convened to close.
 test("torture: Object.prototype pollution does not choose the variant at ANY read site (I-01/I-02)", () => {
@@ -301,14 +301,14 @@ test("torture: Object.prototype pollution does not choose the variant at ANY rea
     i.defineMessages("en", {
         // type-1 slot -- hasOwn guard was already correct (the model to copy).
         slot: "Hi, {name}",
-        // type-3 select variable, read at I18n.js:367.
+        // type-3 select variable, read in renderTokens (type-3 branch).
         sel: "{gender, select, male {He} female {She} other {They}}",
-        // type-2 plural variable, read at I18n.js:354. `#` is a guarded slot,
-        // so the polluted plural renders a sentence with no number in it.
+        // type-2 plural variable, read in renderTokens (type-2 branch). `#` is a
+        // guarded slot, so the polluted plural renders a sentence with no number in it.
         plu: "{count, plural, one {# item} other {# items}}",
-        // type-2 selectordinal variable, read at I18n.js:354.
+        // type-2 selectordinal variable, read in renderTokens (type-2 branch).
         ord: "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}",
-        // plural-object count, read at I18n.js:462 (the TMS-export shape).
+        // plural-object count, read in compilePluralObj (the TMS-export shape).
         obj: { one: "# thing", other: "# things" },
         // nested select>plural -- both the outer select and the inner plural
         // variable must stay own-property-only under pollution.

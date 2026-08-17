@@ -16,8 +16,22 @@
 
 import { signal } from "@zakkster/lite-signal";
 
-// Three-place version sync: package.json, this const, and llms.txt move together.
-export const VERSION = "1.1.4";
+// Four-place version sync: package.json, this const, I18n.d.ts and llms.txt move together.
+export const VERSION = "1.2.0";
+
+// Per-instance ceiling for every per-locale structure keyed on an untrusted
+// string (_readySignals, _pluralRules, _ordinalRules). Sized well under
+// lite-signal's process-wide 1024-node pool so one instance's readiness signals
+// cannot exhaust the pool the whole process shares. The bound is per-instance;
+// see decisions/0003-locale-bounds.md for the multi-instance arithmetic and why
+// resolveLocale (not the ceiling alone) is the real fix at the call site.
+export const LOCALE_CACHE_MAX = 256;
+
+// Per-instance budget for the invalid-locale warning in getRules. The tag set
+// is untrusted input (Accept-Language), so warn-once-per-tag is a log-flood
+// surface, not rate limiting (I-19). After WARN_BUDGET distinct warnings the
+// rest are counted (stats().warningsSuppressed) and silenced.
+const WARN_BUDGET = 32;
 
 // ---------- Token types ----------
 // 0: literal string
@@ -36,6 +50,26 @@ export class MissingKeyError extends Error {
         this.name = "MissingKeyError";
         this.key = key;
         this.locale = locale;
+    }
+}
+
+// Thrown by ready() when the per-instance readiness-signal cache is full. A
+// signal has subscriber IDENTITY, so it is the ONE per-locale structure that
+// fails CLOSED rather than evicting (evicting a signal a live effect is
+// subscribed to silently orphans it -- worse than the leak). This is a package
+// error with a per-INSTANCE blast radius, not lite-signal's process-wide
+// CapacityError. See decisions/0003-locale-bounds.md.
+export class LocaleCapacityError extends Error {
+    constructor(locale, ceiling) {
+        super(
+            `lite-i18n: readiness-signal cache full (${ceiling} locales) -- ` +
+            `cannot register readiness for "${locale}". Bound your locale set with ` +
+            `resolveLocale(requested, supported) before calling ready(); do not feed ` +
+            `it untrusted strings directly.`
+        );
+        this.name = "LocaleCapacityError";
+        this.locale = locale;
+        this.ceiling = ceiling;
     }
 }
 
@@ -510,6 +544,58 @@ function flattenInto(dict, prefix, out) {
     }
 }
 
+// ---------- Locale negotiation ----------
+
+/**
+ * Resolve a requested locale against an application's own supported list using
+ * BCP 47 prefix matching (no RFC 4647 lookup registry). This is the fix for the
+ * unbounded-cache findings AT THE CALL SITE: it turns an untrusted stream of
+ * locale strings into a bounded set drawn from `supported`, so the per-locale
+ * caches only ever see values the app already vouches for.
+ *
+ * Matching, in order, all case-insensitive:
+ *   1. Exact match.
+ *   2. Progressive truncation of the request: `en-US-x` -> `en-US` -> `en`.
+ *   3. Reverse prefix: a bare request `en` matches a supported `en-US`.
+ * Returns the matching entry from `supported` (original casing), or `undefined`
+ * -- a malformed/empty request, an empty list, or no match all fail closed.
+ *
+ * @param {string} requested
+ * @param {string[]} supported
+ * @returns {string|undefined}
+ */
+export function resolveLocale(requested, supported) {
+    if (typeof requested !== "string" || !Array.isArray(supported) || supported.length === 0) {
+        return undefined;
+    }
+    const req = requested.toLowerCase();
+    if (req === "") return undefined;
+    const n = supported.length;
+    // 1. Exact (case-insensitive).
+    for (let i = 0; i < n; i++) {
+        const s = supported[i];
+        if (typeof s === "string" && s.toLowerCase() === req) return s;
+    }
+    // 2. Truncate the request one subtag at a time and re-match.
+    let tag = req;
+    let cut = tag.lastIndexOf("-");
+    while (cut > 0) {
+        tag = tag.slice(0, cut);
+        for (let i = 0; i < n; i++) {
+            const s = supported[i];
+            if (typeof s === "string" && s.toLowerCase() === tag) return s;
+        }
+        cut = tag.lastIndexOf("-");
+    }
+    // 3. Reverse prefix: bare request matches a more-specific supported tag.
+    const reqPrefix = req + "-";
+    for (let i = 0; i < n; i++) {
+        const s = supported[i];
+        if (typeof s === "string" && s.toLowerCase().startsWith(reqPrefix)) return s;
+    }
+    return undefined;
+}
+
 // ---------- createI18n ----------
 
 /**
@@ -536,6 +622,9 @@ export function createI18n(config) {
     const _fallback = [];
     let _missingKeyPolicy = cfg.missingKeyPolicy || "key";
     let _onMissingKey = cfg.onMissingKey || null;
+    let _retiredLocales = 0;                      // cumulative unloadLocale removals
+    let _warnCount = 0;                           // invalid-locale warnings emitted (I-19)
+    let _warningsSuppressed = 0;                  // invalid-locale warnings silenced past WARN_BUDGET
 
     if (cfg.fallback) {
         if (typeof cfg.fallback === "string") _fallback.push(cfg.fallback);
@@ -546,6 +635,17 @@ export function createI18n(config) {
         _epoch.update(function (n) { return (n + 1) | 0; });
     }
 
+    // HOT PATH: the first three lines (get + return-on-hit) are the read path a
+    // plural/selectordinal render calls on every frame. Everything below `if (r)
+    // return r;` is the cache-MISS branch only -- the bound (I-04) and the warn
+    // budget (I-19) add ZERO instructions to the hit path. A miss already
+    // constructs an ICU-backed Intl object, so the eviction it triggers is
+    // cheap by comparison. Eviction is FIFO (oldest inserted), NOT LRU: LRU
+    // needs recency bookkeeping on every hit, which is exactly the hot path we
+    // may not touch. Entries are pure memos of (locale, type) -- reconstructing
+    // any evicted one renders byte-identically -- so WHICH one is evicted is
+    // observationally irrelevant (decisions/0003-locale-bounds.md, proved by
+    // the eviction-equivalence test).
     function getRules(loc, ordinal) {
         const cache = ordinal ? _ordinalRules : _pluralRules;
         let r = cache.get(loc);
@@ -555,17 +655,31 @@ export function createI18n(config) {
                 ? new Intl.PluralRules(loc, { type: "ordinal" })
                 : new Intl.PluralRules(loc);
         } catch (err) {
-            // Warn ONCE per bad locale + type -- the caches below stop
-            // repeated constructor attempts, so this is naturally rate-limited.
-            if (typeof console !== "undefined" && console.warn) {
-                console.warn(
-                    `[lite-i18n] Intl.PluralRules("${loc}"${ordinal ? ", ordinal" : ""}) threw ${err.name}: ${err.message}. ` +
-                    `Falling back to the environment default. Check the locale tag.`
-                );
+            // Warn budget (I-19): warn-once-per-tag is a log-flood surface when
+            // the tag is untrusted (Accept-Language). Cap the warnings per
+            // instance and count the rest -- rate-limit on a fixed budget, not
+            // on the varied input.
+            if (_warnCount < WARN_BUDGET) {
+                _warnCount = (_warnCount + 1) | 0;
+                if (typeof console !== "undefined" && console.warn) {
+                    console.warn(
+                        `[lite-i18n] Intl.PluralRules("${loc}"${ordinal ? ", ordinal" : ""}) threw ${err.name}: ${err.message}. ` +
+                        `Falling back to the environment default. Check the locale tag.`
+                    );
+                }
+            } else {
+                _warningsSuppressed = (_warningsSuppressed + 1) | 0;
             }
             r = ordinal
                 ? new Intl.PluralRules(undefined, { type: "ordinal" })
                 : new Intl.PluralRules();
+        }
+        // Bound (I-04): evict the oldest-inserted entry before growing past the
+        // ceiling. Map iteration is insertion order, so keys().next() is the
+        // FIFO victim. No throw -- reconstructing is identical, so a throw would
+        // convert a leak into an outage for the 1025th visitor locale.
+        if (cache.size >= LOCALE_CACHE_MAX) {
+            cache.delete(cache.keys().next().value);
         }
         cache.set(loc, r);
         return r;
@@ -588,14 +702,7 @@ export function createI18n(config) {
         const rs = _readySignals.get(loc);
         if (rs && !rs.peek()) rs.set(true);
         // Bump epoch only if this locale can affect current resolution.
-        const active = _locale.peek();
-        if (loc === active) {
-            bumpEpoch();
-            return;
-        }
-        for (let i = 0; i < _fallback.length; i++) {
-            if (_fallback[i] === loc) { bumpEpoch(); return; }
-        }
+        if (localeAffectsResolution(loc)) bumpEpoch();
     }
 
     function defineMessages(loc, dict) {
@@ -684,9 +791,69 @@ export function createI18n(config) {
     function ready(loc) {
         let sig = _readySignals.get(loc);
         if (sig) return sig;
+        // Fail CLOSED (not evict): a readiness signal carries subscriber
+        // identity, so silently evicting one orphans a live effect. Throw a
+        // NAMED package error with a per-instance blast radius instead of
+        // letting lite-signal's shared pool throw CapacityError process-wide.
+        if (_readySignals.size >= LOCALE_CACHE_MAX) {
+            throw new LocaleCapacityError(loc, LOCALE_CACHE_MAX);
+        }
         sig = signal(_dicts.has(loc));
         _readySignals.set(loc, sig);
         return sig;
+    }
+
+    function localeAffectsResolution(loc) {
+        if (loc === _locale.peek()) return true;
+        for (let i = 0; i < _fallback.length; i++) {
+            if (_fallback[i] === loc) return true;
+        }
+        return false;
+    }
+
+    // I-12 eviction. Drop the compiled dict, both rules memos, and the ready
+    // signal for `loc`. Order is deliberate: the signal is removed from the map
+    // FIRST and only then set false. A subscriber still holds the reference, so
+    // it observes the true->false transition either way -- but dropping first
+    // means a re-entrant ready() fired from inside that notification re-mints a
+    // fresh signal instead of receiving the one being retired.
+    // Unloading the ACTIVE (or a fallback) locale is PERMITTED:
+    // resolution falls through to the fallback chain and the epoch bumps so
+    // every observer re-renders. Returns true iff a dict was actually removed.
+    function unloadLocale(loc) {
+        if (typeof loc !== "string") throw new TypeError("unloadLocale: locale must be a string");
+        const affects = localeAffectsResolution(loc);
+        const hadDict = _dicts.delete(loc);
+        _pluralRules.delete(loc);
+        _ordinalRules.delete(loc);
+        const rs = _readySignals.get(loc);
+        if (rs) {
+            _readySignals.delete(loc);
+            if (rs.peek()) rs.set(false);
+        }
+        if (hadDict) _retiredLocales = (_retiredLocales + 1) | 0;
+        if (affects) bumpEpoch();
+        return hadDict;
+    }
+
+    // I-12 reset. Release every defined message, compiled entry, cached Intl
+    // rule, readiness signal and in-flight load, and zero the I-19 counters --
+    // WITHOUT reallocating the instance or touching the locale/fallback/policy
+    // configuration (use locale.set / setFallback for those). Bumps the epoch so
+    // every observer re-renders against the empty dictionary.
+    function clear() {
+        _dicts.clear();
+        _pluralRules.clear();
+        _ordinalRules.clear();
+        _loadPromises.clear();
+        for (const [, rs] of _readySignals) {
+            if (rs.peek()) rs.set(false);
+        }
+        _readySignals.clear();
+        _retiredLocales = 0;
+        _warnCount = 0;
+        _warningsSuppressed = 0;
+        bumpEpoch();
     }
 
     function loadLocale(loc, loaderFn) {
@@ -737,6 +904,9 @@ export function createI18n(config) {
             fallback: _fallback.slice(),
             pluralRulesCached: _pluralRules.size,
             ordinalRulesCached: _ordinalRules.size,
+            readySignalsCached: _readySignals.size,
+            retiredLocales: _retiredLocales,
+            warningsSuppressed: _warningsSuppressed,
             loadsInFlight: _loadPromises.size,
         };
     }
@@ -760,6 +930,8 @@ export function createI18n(config) {
         defineMessages,
         loadLocale,
         ready,
+        unloadLocale,
+        clear,
         setFallback,
         setMissingKeyPolicy,
         onMissingKey: setOnMissingKey,
@@ -802,6 +974,8 @@ export function plural(key, count, params) { return _defaultI18n.plural(key, cou
 export function defineMessages(loc, dict) { return _defaultI18n.defineMessages(loc, dict); }
 export function loadLocale(loc, loaderFn) { return _defaultI18n.loadLocale(loc, loaderFn); }
 export function ready(loc) { return _defaultI18n.ready(loc); }
+export function unloadLocale(loc) { return _defaultI18n.unloadLocale(loc); }
+export function clear() { return _defaultI18n.clear(); }
 export function setFallback(f) { return _defaultI18n.setFallback(f); }
 export function setMissingKeyPolicy(p) { return _defaultI18n.setMissingKeyPolicy(p); }
 export function onMissingKey(fn) { return _defaultI18n.onMissingKey(fn); }

@@ -18,7 +18,7 @@
  *                    committed in baseline.json, plus the plural() calibration
  *                    number (100 scavenges/1M, ceiling 104) -- the sixth
  *                    number, the instrument seeing the known-allocating
- *                    function at I18n.js:659.
+ *                    params-merge in the plural() function.
  *   Q3 PAUSE      -- checkNoGc, maxMajor:0 over 1e6 t() (pause time is a
  *                    reported diagnostic, not a gate -- see q3Gate).
  *

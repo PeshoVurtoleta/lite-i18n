@@ -61,10 +61,16 @@ export interface I18nStats {
     currentLocale: string;
     /** Fallback chain snapshot. */
     fallback: string[];
-    /** Number of Intl.PluralRules instances cached (one per locale used with plurals). */
+    /** Number of Intl.PluralRules instances cached. Bounded by `LOCALE_CACHE_MAX` (FIFO eviction). */
     pluralRulesCached: number;
-    /** Number of Intl.PluralRules ordinal instances cached (selectordinal). */
+    /** Number of Intl.PluralRules ordinal instances cached (selectordinal). Bounded by `LOCALE_CACHE_MAX`. */
     ordinalRulesCached: number;
+    /** Number of readiness signals cached. Bounded by `LOCALE_CACHE_MAX` (fails closed, throws `LocaleCapacityError`). */
+    readySignalsCached: number;
+    /** Cumulative count of locales removed via `unloadLocale`. Reset to 0 by `clear`. */
+    retiredLocales: number;
+    /** Invalid-locale warnings silenced past the per-instance budget (I-19). Reset to 0 by `clear`. */
+    warningsSuppressed: number;
     /** Number of `loadLocale` calls currently in flight. */
     loadsInFlight: number;
 }
@@ -102,8 +108,32 @@ export interface I18n {
      */
     loadLocale(locale: string, loaderFn: () => Promise<MessageDict>): Promise<void>;
 
-    /** Reactive readiness signal for a locale. `true` once the dict is registered. */
+    /**
+     * Reactive readiness signal for a locale. `true` once the dict is registered.
+     * Distinct, stable signal identity per locale. Fails closed: throws
+     * `LocaleCapacityError` once `LOCALE_CACHE_MAX` distinct locales have been
+     * queried -- bound your locale set with `resolveLocale` first.
+     */
     ready(locale: string): Signal<boolean>;
+
+    /**
+     * Release the compiled dict, both Intl-rules memos and the readiness signal
+     * for a locale (the signal is removed from the cache, THEN set `false`, so a
+     * subscriber still holding the reference observes the transition while a
+     * re-entrant `ready()` fired from inside that notification re-mints a fresh
+     * signal). Unloading the active/fallback locale is permitted: resolution
+     * falls through the fallback chain and the epoch bumps so every observer
+     * re-renders. Returns `true` iff a dict was removed.
+     */
+    unloadLocale(locale: string): boolean;
+
+    /**
+     * Reset the instance to empty: release every dict, compiled entry, cached
+     * Intl rule, readiness signal and in-flight load, and zero the retired/
+     * suppressed counters. Does NOT change the active locale, fallback chain or
+     * missing-key policy. Bumps the epoch so every observer re-renders.
+     */
+    clear(): void;
 
     /** Replace the fallback chain. Bumps the reactivity epoch. */
     setFallback(fallback: string | string[]): void;
@@ -123,6 +153,32 @@ export class MissingKeyError extends Error {
     readonly locale: string;
     constructor(key: string, locale: string);
 }
+
+/**
+ * Thrown by `ready()` when the per-instance readiness-signal cache is full.
+ * A package error with a per-instance blast radius -- distinct from lite-signal's
+ * process-wide `CapacityError`.
+ */
+export class LocaleCapacityError extends Error {
+    readonly locale: string;
+    readonly ceiling: number;
+    constructor(locale: string, ceiling: number);
+}
+
+/**
+ * Per-instance ceiling for every per-locale cache keyed on an untrusted string
+ * (`_readySignals`, `_pluralRules`, `_ordinalRules`). Sized well under
+ * lite-signal's process-wide 1024-node pool.
+ */
+export const LOCALE_CACHE_MAX: number;
+
+/**
+ * Resolve a requested locale against an app's supported list via BCP 47 prefix
+ * matching (exact -> request truncation -> reverse prefix, all case-insensitive).
+ * Returns the matching `supported` entry, or `undefined` for no match / empty
+ * list / malformed request. The call-site fix that bounds the per-locale caches.
+ */
+export function resolveLocale(requested: string, supported: string[]): string | undefined;
 
 /** Create an isolated i18n instance. */
 export function createI18n(config?: I18nConfig): I18n;
@@ -150,6 +206,8 @@ export function plural(key: string, count: number, params?: MessageParams): stri
 export function defineMessages(locale: string, dict: MessageDict): void;
 export function loadLocale(locale: string, loaderFn: () => Promise<MessageDict>): Promise<void>;
 export function ready(locale: string): Signal<boolean>;
+export function unloadLocale(locale: string): boolean;
+export function clear(): void;
 export function setFallback(fallback: string | string[]): void;
 export function setMissingKeyPolicy(policy: MissingKeyPolicy): void;
 export function onMissingKey(fn: ((key: string, locale: string) => string | void) | null): void;

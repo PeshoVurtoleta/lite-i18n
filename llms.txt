@@ -97,7 +97,17 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
   `#` compiles to `{ type: 1, key: <plural variable> }`.
 
 - **PluralRules cache**: `Map<locale, Intl.PluralRules>` per instance. Lazy;
-  one instance per unique locale used with a plural.
+  one instance per unique locale used with a plural. Bounded at
+  `LOCALE_CACHE_MAX` (256) and FIFO-evicted -- entries are pure `(locale, type)`
+  memos, so reconstructing an evicted one renders byte-identically. FIFO, not
+  LRU, because LRU would require recency bookkeeping on the cache HIT (the hot
+  path); the eviction only runs in the cache-MISS branch that already builds an
+  ICU object.
+
+- **Readiness-signal cache**: `Map<locale, Signal<boolean>>` per instance. A
+  signal carries subscriber IDENTITY, so it is NEVER silently evicted -- it fails
+  CLOSED at `LOCALE_CACHE_MAX` with a named `LocaleCapacityError`. Feed `ready()`
+  bounded input via `resolveLocale`, never raw untrusted locale strings.
 
 - **32-bit modular epoch**: `_epoch` is bumped via `(n + 1) | 0`, wrapping
   signed. lite-signal handles the modular comparison; the counter never
@@ -129,11 +139,43 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.2.0** (2026-08-16, bounded caches + eviction). Every per-locale structure
+  was unbounded and nothing released one; the three fail in OPPOSITE directions,
+  so they take DIFFERENT policies (decisions/0003-locale-bounds.md). I-03:
+  `ready()` cached one lite-signal per distinct locale string and at ~1020 tags
+  exhausted lite-signal's process-wide 1024-node pool, poisoning every lite-*
+  package in the process. Now `ready()` fails CLOSED at `LOCALE_CACHE_MAX` (256)
+  with a NAMED `LocaleCapacityError` (per-instance blast radius, not lite-signal's
+  process-wide `CapacityError`) -- a signal carries subscriber identity, so it is
+  never silently evicted. I-04: `_pluralRules` / `_ordinalRules` grew unbounded
+  keyed on the raw (untrusted) locale when a fallback chain was configured (3000
+  distinct locales -> 3000 cached ICU objects; WITHOUT a fallback the key misses
+  first and 0 are cached). Now FIFO-evicted at `LOCALE_CACHE_MAX` with NO throw --
+  these are pure `(locale, type)` memos, so reconstructing an evicted entry is
+  byte-identical (proven by the eviction-equivalence torture test). Eviction is
+  FIFO, not LRU, because LRU needs recency bookkeeping on every cache HIT, which is
+  the hot path. I-19: warn-once-per-tag was a log-flood surface reachable through
+  `Accept-Language`; a per-instance `WARN_BUDGET` (32) now caps the warnings and
+  counts the rest (`stats().warningsSuppressed`). I-12: `unloadLocale(loc)` drops
+  the dict, both rules memos and the ready signal (removed from the map, THEN set
+  false, so a subscriber still holding the reference sees the transition while a
+  re-entrant `ready()` fired from inside that notification re-mints a fresh
+  signal); `clear()` resets the instance to empty. `resolveLocale(
+  requested, supported)` (BCP 47 prefix matching, no RFC 4647 tables) is the fix
+  AT THE CALL SITE -- it bounds the untrusted stream to the app's own list.
+  `stats()` gains `readySignalsCached`, `retiredLocales`, `warningsSuppressed`.
+  `t()` and `plural()` take ZERO new instructions (bounds live in the cache-miss
+  branch and in `ready()`, none of which is hot); I0's six Q2 ceilings are
+  unmoved. The lite-leak retention witness stays deferred (I-14: `@zakkster/
+  lite-leak` still peer-requires `lite-signal >=1.5.0-beta.3`; installed 1.4.0,
+  registry latest 1.4.3 -- unresolvable).
+
 - **1.1.4** (2026-08-15, security fix). I-01: prototype pollution could choose
   which variant rendered. The type-1 slot was `Object.hasOwn`-guarded, but the
   three selector reads were bare `params[key]` -- the `{var, plural, ...}` /
-  `{var, selectordinal, ...}` variable (I18n.js:354), the `{var, select, ...}`
-  variable (:367), and the plural-object `count` (:462). A single
+  `{var, selectordinal, ...}` variable and the `{var, select, ...}` variable
+  (both in `renderTokens`), and the plural-object `count` (in
+  `compilePluralObj`). A single
   `Object.prototype.gender = "male"` flipped `"They"` to `"He"`; `.count = 1`
   flipped `" items"` to `" item"` (with no number, since `#` is a guarded slot).
   Shipped in 1.1.2 and 1.1.3. Fixed with one `Object.hasOwn` per selector read
@@ -255,22 +297,40 @@ interface I18nConfig {
     messages?:            Record<string, MessageDict>;
 }
 
+interface I18nStats {
+    locales: number;
+    keys: number;
+    currentLocale: string;
+    fallback: string[];
+    pluralRulesCached: number;     // bounded by LOCALE_CACHE_MAX (FIFO)
+    ordinalRulesCached: number;    // bounded by LOCALE_CACHE_MAX (FIFO)
+    readySignalsCached: number;    // bounded by LOCALE_CACHE_MAX (fails closed)
+    retiredLocales: number;        // cumulative unloadLocale removals; clear() resets
+    warningsSuppressed: number;    // invalid-locale warns silenced past WARN_BUDGET (I-19)
+    loadsInFlight: number;
+}
+
 interface I18n {
     readonly locale: Signal<string>;
     t(key: string, params?: MessageParams): string;
     plural(key: string, count: number, params?: MessageParams): string;
     defineMessages(locale: string, dict: MessageDict): void;
     loadLocale(locale: string, loader: () => Promise<MessageDict>): Promise<void>;
-    ready(locale: string): Signal<boolean>;
+    ready(locale: string): Signal<boolean>;   // fails closed: throws LocaleCapacityError at the ceiling
+    unloadLocale(locale: string): boolean;    // drop dict + rules + ready signal; true iff a dict was removed
+    clear(): void;                            // reset instance to empty; keeps locale/fallback/policy
     setFallback(chain: string | string[]): void;
     setMissingKeyPolicy(p: "key" | "warn" | "throw"): void;
     onMissingKey(fn: ((key: string, locale: string) => string | void) | null): void;
     stats(): I18nStats;
 }
 
+const LOCALE_CACHE_MAX: number;           // 256 -- per-instance per-locale cache ceiling
 function createI18n(config?: I18nConfig): I18n;
 function setDefaultI18n(inst: I18n): void;
 function getDefaultI18n(): I18n;
+// BCP 47 prefix match (exact -> request truncation -> reverse prefix, case-insensitive)
+function resolveLocale(requested: string, supported: string[]): string | undefined;
 
 // Top-level helpers (default instance)
 let locale: Signal<string>;               // ESM live binding
@@ -279,6 +339,8 @@ function plural(key: string, count: number, params?: MessageParams): string;
 function defineMessages(locale: string, dict: MessageDict): void;
 function loadLocale(locale: string, loader: () => Promise<MessageDict>): Promise<void>;
 function ready(locale: string): Signal<boolean>;
+function unloadLocale(locale: string): boolean;
+function clear(): void;
 function setFallback(chain: string | string[]): void;
 function setMissingKeyPolicy(p: "key" | "warn" | "throw"): void;
 function onMissingKey(fn: ((key: string, locale: string) => string | void) | null): void;
@@ -287,6 +349,11 @@ function stats(): I18nStats;
 class MissingKeyError extends Error {
     key: string;
     locale: string;
+}
+
+class LocaleCapacityError extends Error {  // thrown by ready() at LOCALE_CACHE_MAX
+    locale: string;
+    ceiling: number;
 }
 
 // Format (@zakkster/lite-i18n/format)
@@ -357,9 +424,12 @@ Runtime coercion:
 - `defineMessages` is atomic: templates compile into a staging Map first,
   committed only on success. A bad template mid-dict throws without leaving
   a partial update.
-- `Intl.PluralRules` construction failure (invalid locale tag) logs a single
-  `console.warn` and falls back to the environment default. Cached per locale
-  so it can't spam.
+- `Intl.PluralRules` construction failure (invalid locale tag) falls back to the
+  environment default and warns -- but the warning is rate-limited on a
+  per-instance `WARN_BUDGET` (32), NOT per-tag (the tag set is untrusted input;
+  warn-once-per-tag is a log-flood surface, I-19). Warnings past the budget are
+  counted in `stats().warningsSuppressed`. The fallback rules are cached under the
+  bad key, subject to the same `LOCALE_CACHE_MAX` FIFO bound as valid locales.
 - `loadLocale` invokes its loader via `Promise.resolve().then(loaderFn)`, so
   synchronous throws inside the loader route through the async rejection
   path. The inflight slot clears on both success and failure -- retry works
@@ -395,13 +465,23 @@ plural("items", 3);                       // -> "3 items"
 defineMessages("en", { m: "{n, plural, one {only #} other {# in total}}" });
 t("m", { n: 42 });                        // -> "42 in total"
 
-// Async chunk load with ready gate
+// Bound untrusted input BEFORE it reaches the caches (the I-03/I-04 fix)
+import { resolveLocale, createI18n } from "@zakkster/lite-i18n";
+const SUPPORTED = ["en", "de", "fr", "bg"];
+const loc = resolveLocale(req.headers["accept-language"] || "", SUPPORTED) || "en";
+const i = createI18n({ locale: loc, fallback: "en" });   // caches only ever see SUPPORTED
+
+// Async chunk load with ready gate (ready() before the locale exists is the point)
 import { loadLocale, ready, locale } from "@zakkster/lite-i18n";
 effect(() => {
     if (!ready("bg")()) { spinner.show(); return; }
     spinner.hide();
 });
 loadLocale("bg", () => import("./locales/bg.js").then(m => m.default));
+
+// Release a locale (frees the dict, both rules memos and the ready signal)
+i.unloadLocale("bg");   // active/fallback unload falls through to the chain + bumps epoch
+i.clear();              // reset the instance to empty (keeps locale/fallback/policy)
 
 // Fallback chain
 const i = createI18n({ locale: "de-CH", fallback: ["de", "en"] });

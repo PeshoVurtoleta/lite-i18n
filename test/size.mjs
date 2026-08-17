@@ -21,12 +21,36 @@ import { dirname, join } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Budgets in GZIPPED-SOURCE bytes. Headroom over the 1.1.3 measurement
-// (I18n.js 8777, Format.js 2128) sized to catch a material regression while
-// absorbing normal feature growth. Move these only alongside a re-measured
+// Budgets in GZIPPED-SOURCE bytes. Headroom sized to catch a material regression
+// while absorbing normal feature growth. Move these only alongside a re-measured
 // min+gz claim in llms.txt / package.json.
+//
+// I18n.js budget moved 10240 -> 13312 at v1.2.0. WHY, with the numbers -- all
+// measured with THIS file's own method (zlib level 9), so they are re-derivable:
+//
+//                    gzipped source   code-only (comments stripped)
+//   5d271ef                8943 B                  4637 B
+//   v1.2.0                11718 B                  5410 B
+//   growth                +2775 B                  + 773 B   <- 72% is comments
+//
+// "Comments stripped" means: remove /* */ blocks, drop whole-line // comments,
+// collapse the resulting blank-line runs. State the method wherever the split is
+// cited -- a different stripper yields different absolute numbers, which is how
+// the first draft of this note drifted (it was measured at gzip's DEFAULT level,
+// not level 9, and read 8974/11653).
+//
+// So the metric measures GZIPPED SOURCE and only +773 B of the growth is CODE --
+// proportionate for resolveLocale + unloadLocale + clear + LocaleCapacityError +
+// bounded caches + eviction + the warn budget + three stats() fields. The other
+// 72% is docstrings, which suite law mandates and which cost ZERO shipped bytes
+// after minification. Shrinking comments to fit a source-bytes proxy would
+// optimize the measurement, not the artifact (the I-10 pathology), so the budget
+// moves instead: 13312 B = measured 11718 + ~14% headroom, the same proportional
+// margin the original 10240 held over its measurement. The metric's own blind
+// spot -- it taxes comment density and cannot see true min+gz -- is filed as
+// I-20 (roadmap S3, assigned I7) next to I-13/I-18.
 const BUDGETS = [
-    { file: "I18n.js", gzBudget: 10240 },
+    { file: "I18n.js", gzBudget: 13312 },
     { file: "Format.js", gzBudget: 2560 },
 ];
 

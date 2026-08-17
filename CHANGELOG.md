@@ -2,6 +2,162 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.2.0 -- 2026-08-16 (bounded caches + eviction)
+
+Every per-locale structure was unbounded and nothing ever released one. The
+three fail in OPPOSITE directions, so they take DIFFERENT policies -- see
+`decisions/0003-locale-bounds.md` for the full argument and the
+eviction-equivalence proof that licenses the split.
+
+### Fixed
+
+- **I-03 (process-fatal): `ready()` exhausted lite-signal's process-wide node
+  pool.** Each distinct locale string lazily minted and permanently cached one
+  lite-signal; at ~1020 distinct strings the shared 1024-node pool threw
+  `CapacityError`, and then `createI18n()` itself threw -- every signal in every
+  lite-* package in the process, dead. Locale strings ARE untrusted input.
+  Fixed: the readiness cache fails **closed** at `LOCALE_CACHE_MAX` (256) with a
+  NAMED `LocaleCapacityError` (naming the locale and the ceiling) whose blast
+  radius is the INSTANCE, not the process. A signal carries subscriber identity,
+  so it is never silently evicted; the rejected shared-singleton and LRU designs
+  both break the documented ready-before-load idiom (measured; four identity
+  tests pin the contract). The call-site fix is `resolveLocale` (below) -- the
+  ceiling is a backstop, because a per-instance bound alone does not stop four
+  tenants at 256 from oversubscribing the pool (arithmetic in 0003).
+- **I-04 (silent): `_pluralRules` / `_ordinalRules` grew without bound** keyed on
+  the raw untrusted locale, but ONLY when a fallback chain is configured -- the
+  correction that changes the test. Measured on 1.1.4: 3000 distinct locales with
+  `fallback:"en"` cached 3000 ICU-backed `Intl.PluralRules` forever; the SAME
+  3000 with NO fallback cached 0 (the key misses before `getRules` runs). A test
+  written from the no-fallback row passes against a fully broken cache, so both
+  rows are asserted by name. Fixed: FIFO eviction at `LOCALE_CACHE_MAX`, NO throw
+  -- the entries are pure `(locale, type)` memos, so a reconstructed entry renders
+  byte-identically (proven by an eviction-equivalence test) and a throw would
+  convert a leak into an SSR outage. FIFO, not LRU: LRU needs recency bookkeeping
+  on every cache HIT, which is the hot path.
+- **I-12 (no eviction API): a compiled dict, once defined, lived for the life of
+  the instance.** Added `unloadLocale(loc)` -- drops the dict, both rules memos
+  and the readiness signal (dropped from the map and then set false, so a
+  subscriber holding the reference sees the transition while a re-entrant
+  `ready()` re-mints a fresh signal); unloading the active/fallback locale is
+  permitted and bumps the
+  epoch so every observer re-renders through the fallback chain. Added `clear()`
+  -- releases every dict, compiled entry, cached rule, readiness signal and
+  in-flight load and zeroes the counters, keeping the locale/fallback/policy
+  configuration. `stats()` gains `readySignalsCached`, `retiredLocales`,
+  `warningsSuppressed`. **Limitation, stated rather than discovered:** releasing
+  a readiness signal drops it from the cache but does NOT return its node to
+  lite-signal's pool -- reclamation there needs an explicit `dispose`, which is
+  unsafe while a subscriber may hold the signal. A `clear()`-then-repopulate
+  loop burns fresh pool nodes per cycle (bounded per cycle, not cycle-stable).
+  `decisions/0003-locale-bounds.md` records why, and a future session needing
+  cycle-stable reclamation must settle safe disposal in lite-signal first.
+- **I-19 (log-flood): warn-once-per-tag was not rate limiting when the tag is
+  untrusted.** 500 distinct invalid `Accept-Language` tags produced 500
+  `console.warn` calls. Fixed: a per-instance `WARN_BUDGET` (32) caps the
+  warnings and counts the rest in `stats().warningsSuppressed` -- rate-limit on a
+  fixed budget, not on the varied input.
+
+### Added
+
+- **`resolveLocale(requested, supported)`** -- BCP 47 prefix matching (exact ->
+  request truncation -> reverse prefix, case-insensitive; no RFC 4647 lookup
+  tables), returning the matching supported entry or `undefined`. This is the fix
+  AT THE CALL SITE: it bounds an untrusted stream of locale strings to the app's
+  own list, so the per-locale caches only ever see vouched-for values.
+- **`LocaleCapacityError`** (with `.locale` and `.ceiling`) and the
+  **`LOCALE_CACHE_MAX`** constant, both exported and declared in `I18n.d.ts`.
+
+### Hot path
+
+`t()` and `plural()` take ZERO new instructions -- every bound is checked in a
+cache-MISS branch (`getRules`' miss already builds an Intl object) or in
+`ready()` (not hot). Re-measured under the pinned semi-space: the six Q2 ceilings
+are **bit-identical** to `baseline.json` -- static 0/4, slot 23/27, plural 46/50,
+select 0/4, selectordinal 46/50, `plural()` 100/104. Q1 (`maxBytesPerCall:0`) and
+Q3 (`maxMajor:0`) unchanged.
+
+### Tests (prove-both-directions)
+
+Every new assertion in `test/11-locale-bounds.test.mjs` (26 tests) was run against
+the pre-fix code (`git show 5d271ef:I18n.js`) and shown to FAIL. Recorded output:
+
+```
+FAIL export resolveLocale exists            -- typeof = undefined
+FAIL export LocaleCapacityError exists      -- typeof = undefined
+FAIL export LOCALE_CACHE_MAX exists         -- typeof = undefined
+FAIL I-04 row2 pluralRulesCached <= 256     -- actual = 1000
+FAIL stats().readySignalsCached exists      -- value = undefined
+FAIL ready() throws LocaleCapacityError     -- grew unbounded past 256, no named error
+FAIL I-19 warnings capped <= 32             -- actual warns = 300
+FAIL I-19 warningsSuppressed counted        -- warningsSuppressed = undefined
+FAIL unloadLocale exists                    -- typeof = undefined
+FAIL clear exists                           -- typeof = undefined
+```
+
+The pre-fix cache measurements that motivate the fix (same tree): I-04 with a
+fallback cached **3000** rules and rendered `"2 items"`; the SAME run with NO
+fallback cached **0** and rendered the literal `"p"`; a `selectordinal` template
+doubled the surface (**1000 cardinal + 1000 ordinal**); the warn flood produced
+**500** `console.warn` calls. Post-fix: 256 / 0 / 256+256 / 32-warns-plus-468-
+suppressed. The `ready()` identity contract passes pre-fix too (by design -- it
+fences the rejected shared-singleton OUT, it does not prove a bug fixed).
+
+### Torture
+
+- T4 (lifecycle) and T8 (cross-surface + lite-signal pool budget) filled; T7
+  (soak) extended with an `unloadLocale` churn and the new `stats()` fields; T9
+  gains controls **7** (defeat `_pluralRules` eviction via a `Map.prototype.delete`
+  stub -> T4/T7 conservation goes red) and **8** (defeat the `_readySignals`
+  ceiling via a `Map.prototype.size` stub -> T8 pool budget goes red). Both break
+  REAL library code in the shipped path, never a replica. `I18N_TORTURE_BREAK=1`
+  now trips 9/9 controls (was 7/7).
+
+### Size budget (moved deliberately)
+
+The `I18n.js` gzipped-SOURCE budget moved **10240 -> 13312 B** (`test/size.mjs`).
+Measured with the gate's own method (`zlib` level 9), so the numbers are
+re-derivable:
+
+| | gzipped source | code only (comments stripped) |
+| --- | --- | --- |
+| `5d271ef` (v1.1.4) | 8943 B | 4637 B |
+| v1.2.0 | 11718 B | 5410 B |
+| growth | **+2775 B** | **+773 B** |
+
+"Comments stripped" = remove `/* */` blocks, drop whole-line `//` comments,
+collapse the resulting blank-line runs; a different stripper gives different
+absolute numbers, so the method travels with the figure. (The first draft of
+this note read 8974/11653 -- it was measured at gzip's default level rather than
+level 9, and qa caught the drift.)
+
+The gate measures SOURCE, not min+gz, and only **+773 B of the growth is code**
+-- proportionate for `resolveLocale` + `unloadLocale` + `clear` +
+`LocaleCapacityError` + bounded caches + eviction + the warn budget + three
+`stats()` fields. **72% of the gzipped growth is docstrings**, which suite law
+mandates and which minify to zero shipped bytes. Shrinking comments to fit a
+source-bytes proxy would optimize the measurement, not the artifact (the I-10
+pathology), so the budget moved instead: 13312 B is the measured 11718 + ~14%
+headroom, matching the proportional margin the old 10240 held over its
+measurement. The metric's blind spot (it taxes comment density and cannot verify
+the README's ~3.5 KB min+gz claim) is filed as **I-20** (roadmap S3, assigned
+I7). A trivial dedup landed alongside:
+`internalDefine` now reuses `localeAffectsResolution` instead of re-inlining the
+active/fallback scan.
+
+### Known issues / deferrals
+
+- **I-14: the lite-leak retention witness is STILL deferred.** Re-checked at I2:
+  `npm i -D @zakkster/lite-leak` fails ERESOLVE -- `@zakkster/lite-leak@1.8.1`
+  peer-requires `@zakkster/lite-signal >=1.5.0-beta.3 <2.0.0`; the registry's
+  latest lite-signal is 1.4.3 (installed 1.4.0) and no 1.5.x exists, so the peer
+  cannot be satisfied. lite-leak is NOT in `devDependencies`. T7 ships the
+  structural-conservation half plus the T4/T8 pool-budget assertions; the second
+  (retention) witness waits on a compatible lite-signal.
+- **I-05** (async load overwrites a later synchronous define) remains open, owned
+  by I3. `clear()`-with-a-load-in-flight documents the same write-race honestly
+  rather than papering over it.
+
 ## 1.1.4 -- 2026-08-15 (security fix)
 
 ### Fixed
@@ -91,8 +247,8 @@ sole source edit to `I18n.js` is the added `VERSION` export.
     window. Committed per-shape ceilings in `test/torture/baseline.json`
     (measured: static/select 0, slot 23, plural/selectordinal 46; ceilings are
     measured+4) plus the `plural()` calibration number (100 scavenges/1M,
-    ceiling 104) -- the instrument seeing the known-allocating function at
-    `I18n.js:659`. The gate resolves the smallest realistic regression (one
+    ceiling 104) -- the instrument seeing the known-allocating params-merge in
+    the `plural()` body. The gate resolves the smallest realistic regression (one
     un-hoisted per-call object) as +8 scavenges/1M and fails it. Two earlier
     drafts were wrong -- one concluded Q2 was ungateable "by escape analysis"
     (the object is genuinely allocated; the sampler was under-sampling), the
@@ -122,7 +278,7 @@ sole source edit to `I18n.js` is the added `VERSION` export.
   across the await boundary, with no signal. Fixed in I3 (v1.2.1).
 - **I-15 (S2): `plural()` silently drops the count on a nested template.**
   `compileString` scans top-level tokens only for the plural variable
-  (`I18n.js:407-412`); when the outer token is a `select`, the scan misses the
+  (the pluralVar scan); when the outer token is a `select`, the scan misses the
   inner plural, so `plural('nest', 3, {g:'male'})` merges the count under
   `"count"` instead of the real variable and renders `"He has  apples"` instead
   of `"He has 3 apples"`. **The torture suite caught this on its very first run**

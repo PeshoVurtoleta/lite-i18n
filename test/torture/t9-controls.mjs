@@ -1,7 +1,7 @@
 /**
  * T9 -- controls. Every gate must be provably able to fail.
  *
- * Six deliberately-broken scenarios, each fed to the REAL gate it targets.
+ * Nine deliberately-broken scenarios, each fed to the REAL gate it targets.
  * A control passes only if the gate FLAGS the broken input AND accepts the
  * matching good input (so no gate is vacuously always-failing). If any gate is
  * blind, T9 fails the whole run -- a gate that cannot fail is decorative.
@@ -22,25 +22,37 @@
  *   5.  fail-loud     -- a plural missing 'other' must throw at define; a valid
  *                        template must not.
  *   6.  selector-guard-- reverting ONE of the three I-01 hasOwn guards (the
- *                        type-3 select read, I18n.js:367) must make T2's identity
- *                        property fail: an inherited Object.prototype.gender then
- *                        changes the rendered variant. The shipped guarded read
- *                        must keep the property (inherited -> `other`).
+ *                        type-3 select read in renderTokens) must make T2's
+ *                        identity property fail: an inherited Object.prototype.
+ *                        gender then changes the rendered variant. The shipped
+ *                        guarded read must keep the property (inherited -> other).
+ *   7.  rules-bound   -- (I2) defeating _pluralRules/_ordinalRules eviction in
+ *                        the SHIPPED getRules (stub Map.prototype.delete, the
+ *                        primitive its FIFO victim removal calls) must make the
+ *                        T4/T7 conservation bound go red past LOCALE_CACHE_MAX;
+ *                        the shipped eviction keeps it bounded.
+ *   8.  pool-budget   -- (I2) defeating the _readySignals ceiling in the SHIPPED
+ *                        ready() (stub Map.prototype.size -> 0, the value the
+ *                        guard reads) lets it mint one pool node per distinct
+ *                        locale, so T8's pool-budget gate goes red as
+ *                        consumption scales with input; the shipped fail-closed
+ *                        ceiling caps consumption regardless of input.
  *
- * `node --expose-gc test/torture.mjs` runs all seven every time, so a plain
- * torture run already proves the gates bite (7/7 -> tier passes silently).
- * `I18N_TORTURE_BREAK=1 ...` requires 7/7 and then exits non-zero to signal the
- * control run -- the "exits non-zero on each control" contract (a second Q2
- * control and the I1 selector-guard control were added on review, so the count
- * is 7, not the brief's original 5).
+ * `node --expose-gc test/torture.mjs` runs all nine every time, so a plain
+ * torture run already proves the gates bite (9/9 -> tier passes silently).
+ * `I18N_TORTURE_BREAK=1 ...` requires 9/9 and then exits non-zero to signal the
+ * control run. The count grew from I1's 7 to 9: controls 7 and 8 were added in
+ * I2 for the two new cache-bound gates, each breaking REAL library code in the
+ * shipped path (Map.prototype.delete / .size), never a local replica.
  */
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createI18n } from "../../I18n.js";
+import { stats as signalStats, dispose } from "@zakkster/lite-signal";
+import { createI18n, LOCALE_CACHE_MAX, LocaleCapacityError } from "../../I18n.js";
 import {
-    die, BREAK, conserved,
+    die, BREAK, conserved, withinLocaleBounds,
     measureAllocs, checkAllocs, Q1_CFG,
     q2Scavenges, Q2_OPS, Q2_WARM,
     q3Gate,
@@ -134,8 +146,8 @@ function control5() {
 // byte-identical to the unpolluted render.
 //
 // Direction B reverts the guards in the REAL library code, not in a replica.
-// All three guarded selector reads (I18n.js:354 type-2, :367 type-3, :462
-// plural-object) funnel through the same primitive, so stubbing Object.hasOwn to
+// All three guarded selector reads (renderTokens type-2 and type-3, and
+// compilePluralObj) funnel through the same primitive, so stubbing Object.hasOwn to
 // `() => true` restores the exact 1.1.3 fail-open behaviour at all three sites at
 // once, inside the shipped renderTokens -- no hand-rolled stand-in that could
 // drift from the code it claims to model. An earlier draft of this control
@@ -182,8 +194,73 @@ function control6() {
     return guardedHeld && brokenCaught;
 }
 
+// Control 7 (I2) -- the _pluralRules/_ordinalRules FIFO eviction bound. The
+// shipped getRules evicts its oldest entry with `cache.delete(cache.keys().
+// next().value)` before growing past LOCALE_CACHE_MAX. Stubbing Map.prototype.
+// delete to a no-op disables that removal INSIDE the shipped getRules -- no
+// replica -- so distinct locales cache without bound and the T4/T7 conservation
+// gate (withinLocaleBounds) goes red. The good run, with real delete, stays
+// bounded. Same discipline as control6: break a global the shipped path calls.
+function control7() {
+    const realDelete = Map.prototype.delete;
+    const w = console.warn;
+    console.warn = () => {};
+    // Good: real eviction keeps the cache bounded past the ceiling.
+    const good = createI18n({ locale: "en", fallback: "en" });
+    good.defineMessages("en", { p: "{n, plural, one {# a} other {# b}}" });
+    for (let n = 0; n < LOCALE_CACHE_MAX + 60; n++) { good.locale.set("g7-" + n); good.t("p", { n: 2 }); }
+    const goodBounded = withinLocaleBounds(good, LOCALE_CACHE_MAX);
+    // Broken: eviction defeated in the shipped getRules -> unbounded.
+    const bad = createI18n({ locale: "en", fallback: "en" });
+    bad.defineMessages("en", { p: "{n, plural, one {# a} other {# b}}" });
+    let brokenRed;
+    try {
+        Map.prototype.delete = function () { return false; };
+        for (let n = 0; n < LOCALE_CACHE_MAX + 60; n++) { bad.locale.set("b7-" + n); bad.t("p", { n: 2 }); }
+        brokenRed = !withinLocaleBounds(bad, LOCALE_CACHE_MAX);
+    } finally {
+        Map.prototype.delete = realDelete;
+        console.warn = w;
+    }
+    return goodBounded && brokenRed;
+}
+
+// Control 8 (I2) -- the _readySignals ceiling / T8 pool budget. The shipped
+// ready() fails closed when `_readySignals.size >= LOCALE_CACHE_MAX`. Stubbing
+// Map.prototype.size to 0 makes that guard read 0 INSIDE the shipped ready() --
+// no replica -- so it mints one lite-signal pool node per distinct locale and
+// pool consumption SCALES with observed locales, which is exactly what T8's
+// budget gate forbids. With the real guard, consumption caps at the ceiling no
+// matter how many distinct locales stream through. Measured against lite-signal's
+// own activeNodes gauge; every minted signal is disposed so the control does not
+// draw down the shared pool for the rest of the run.
+function control8() {
+    const sizeDesc = Object.getOwnPropertyDescriptor(Map.prototype, "size");
+    function poolDelta(distinct, defeat) {
+        const base = signalStats().activeNodes;
+        const inst = createI18n({ locale: "en" });
+        const sigs = [];
+        if (defeat) Object.defineProperty(Map.prototype, "size", { configurable: true, get() { return 0; } });
+        try {
+            for (let n = 0; n < distinct; n++) {
+                try { sigs.push(inst.ready("p8-" + defeat + "-" + n)); }
+                catch (e) { if (!(e instanceof LocaleCapacityError)) throw e; }
+            }
+        } finally {
+            if (defeat) Object.defineProperty(Map.prototype, "size", sizeDesc);
+        }
+        const delta = signalStats().activeNodes - base;
+        for (let k = 0; k < sigs.length; k++) dispose(sigs[k]);
+        return delta;
+    }
+    const budget = LOCALE_CACHE_MAX + 8;             // ceiling + instance signals + slack (mirrors T8)
+    const goodBounded = poolDelta(700, false) <= budget;   // real ceiling caps ~256 despite 700 distinct
+    const brokenRed = poolDelta(700, true) > budget;       // ceiling defeated -> ~700 pool nodes -> T8 red
+    return goodBounded && brokenRed;
+}
+
 export async function run() {
-    const labels = ["1 Q1-retention", "2 Q2-large", "2b Q2-minimal", "3 Q3-pause", "4 conservation", "5 fail-loud", "6 selector-guard"];
+    const labels = ["1 Q1-retention", "2 Q2-large", "2b Q2-minimal", "3 Q3-pause", "4 conservation", "5 fail-loud", "6 selector-guard", "7 rules-bound", "8 pool-budget"];
     const results = [
         control1(),
         await control2(),
@@ -192,6 +269,8 @@ export async function run() {
         control4(),
         control5(),
         control6(),
+        control7(),
+        control8(),
     ];
     const N = results.length;
     let caught = 0;

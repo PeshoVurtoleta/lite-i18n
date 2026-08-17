@@ -123,12 +123,15 @@ Zero allocation except the produced string. And because it's built on
 - **`locale`** -- the current-locale signal. Read with `locale()`, mutate with `locale.set(...)`.
 - **`defineMessages(locale, dict)`** -- register or extend a locale's dictionary.
 - **`loadLocale(locale, loaderFn)`** -- async loader with in-flight dedup + error retry.
-- **`ready(locale)`** -- reactive readiness signal for a locale.
+- **`ready(locale)`** -- reactive readiness signal for a locale (bounded, fails closed).
+- **`unloadLocale(locale)`** / **`clear()`** -- release a locale, or reset the instance.
+- **`resolveLocale(requested, supported)`** -- BCP 47 prefix matching; bound untrusted input.
 - **`setFallback(chain)`** -- replace the fallback chain.
 - **`setMissingKeyPolicy(policy)`** / **`onMissingKey(fn)`** -- missing-key behavior.
 - **`createI18n(config)`** / **`setDefaultI18n(inst)`** -- isolated instances.
 - **`stats()`** -- live snapshot for debugging.
-- **`MissingKeyError`** -- thrown by the `'throw'` policy.
+- **`LOCALE_CACHE_MAX`** -- the per-instance per-locale cache ceiling (256).
+- **`MissingKeyError`** / **`LocaleCapacityError`** -- thrown by `'throw'` policy / the readiness ceiling.
 
 From `@zakkster/lite-i18n/format`:
 
@@ -504,11 +507,98 @@ For repeated remote fetches with generation-guarded races (search-as-you-type
 shape), reach for `@zakkster/lite-resource` instead -- `loadLocale` is
 one-shot-per-locale by design.
 
-Calling `ready(locale)` lazily creates a signal keyed by the locale string
-and caches it for future reads. If your code produces an unbounded stream of
-distinct locale strings (dynamic tenant IDs, unfiltered user input), the
-map grows. In practice locale sets are small and stable; this only bites if
-you feed `ready()` untrusted keys.
+Calling `ready(locale)` lazily creates a lite-signal keyed by the locale string
+and caches it. Each such signal draws one node from lite-signal's **process-wide
+1024-node pool**, shared with every other lite-* package in the process. Prior to
+1.2.0 that cache was unbounded: feed `ready()` an unbounded stream of distinct
+strings (dynamic tenant IDs, unfiltered `Accept-Language`) and at ~1020 distinct
+locales the pool threw `CapacityError` -- and then the **next `createI18n()`
+threw too**, and so did every signal in every other lite-* package. The failure
+was not "the map grows"; it was **the process dies, and takes the ecosystem
+sharing that pool down with it.** Locale strings are untrusted input.
+
+As of 1.2.0 the readiness cache is bounded per instance at `LOCALE_CACHE_MAX`
+(256) and **fails closed**: the 257th distinct locale throws a named
+`LocaleCapacityError` (with `.locale` and `.ceiling`) whose blast radius is the
+one instance, not the process. But the real fix is at the call site -- bound the
+stream to your own supported list with [`resolveLocale`](#locale-negotiation)
+before it ever reaches `ready()`:
+
+```js
+import { resolveLocale, createI18n } from "@zakkster/lite-i18n";
+const SUPPORTED = ["en", "de", "fr", "bg"];
+const loc = resolveLocale(acceptLanguage, SUPPORTED) || "en";  // bounded set
+const i = createI18n({ locale: loc, fallback: "en" });
+```
+
+---
+
+## Locale negotiation
+
+`resolveLocale(requested, supported)` matches a requested locale against your
+app's supported list using BCP 47 prefix matching (no RFC 4647 lookup registry).
+It is the mechanism that turns an unbounded stream of untrusted locale strings
+into a bounded set drawn from a list you control -- the fix for the readiness and
+Intl-cache bounds *at the call site*.
+
+```js
+resolveLocale("en-US",  ["en", "fr"])        // -> "en"      (prefix)
+resolveLocale("EN-us",  ["en"])              // -> "en"      (case-insensitive)
+resolveLocale("en",     ["en-US", "fr-FR"])  // -> "en-US"   (reverse prefix)
+resolveLocale("ja",     ["en", "fr"])        // -> undefined (no match)
+resolveLocale("en",     [])                  // -> undefined (empty list)
+resolveLocale("",       ["en"])              // -> undefined (malformed)
+```
+
+Matching order, all case-insensitive: exact match, then progressive truncation
+of the request (`en-US-x` -> `en-US` -> `en`), then reverse prefix (a bare
+request matches a more-specific supported tag). Returns the supported entry in
+its original casing, or `undefined` -- which fails closed.
+
+---
+
+## Eviction and reset
+
+Two per-locale caches leak silently without an eviction path; 1.2.0 adds one, and
+the two eviction *policies* differ on purpose:
+
+| Structure | Policy | Why |
+| --- | --- | --- |
+| `ready()` signals | **fail closed** (throw at the ceiling) | a signal carries subscriber identity -- silently evicting one orphans a live effect (the spinner never hides). Worse than the leak. |
+| `Intl.PluralRules` caches | **FIFO eviction**, no throw | pure `(locale, type)` memos -- a reconstructed entry renders byte-identically, so evicting one is invisible; throwing would turn a leak into an outage. |
+| defined dictionaries | **explicit API only** | never evict what you defined -- you retire it with the calls below. |
+
+A reader who sees a throw in one cache and silent eviction in another is looking
+at a deliberate split, not an inconsistency: the deciding question is whether the
+entry has identity a caller can hold. See `decisions/0003-locale-bounds.md`.
+
+```js
+i.unloadLocale("bg");  // drop bg's dict, its cardinal + ordinal rules, and its
+                       // ready signal (set false so subscribers see it go).
+                       // Unloading the ACTIVE or a fallback locale is allowed:
+                       // resolution falls through the chain and every observer
+                       // re-renders. Returns true iff a dict was removed.
+
+i.clear();             // reset to empty: release all dicts, compiled entries,
+                       // cached rules, ready signals and in-flight loads, and
+                       // zero the retired/suppressed counters. Keeps the active
+                       // locale, fallback chain and missing-key policy.
+```
+
+`stats()` exposes every cache the bound touches: `readySignalsCached`,
+`pluralRulesCached` and `ordinalRulesCached` (each bounded by `LOCALE_CACHE_MAX`),
+`retiredLocales` (cumulative `unloadLocale` removals), and `warningsSuppressed`
+(invalid-locale warnings silenced past the per-instance budget).
+
+**One limitation worth knowing before you loop on `clear()`.** Releasing a
+readiness signal drops it from the cache -- so `readySignalsCached` falls to
+zero -- but it does **not** return that signal's node to lite-signal's pool.
+lite-signal reclaims only on an explicit `dispose`, and disposing a signal a
+subscriber may still hold is unsafe, so this package does not do it. A
+`clear()`-then-repopulate loop therefore consumes fresh pool nodes on every
+cycle: bounded per cycle by `LOCALE_CACHE_MAX`, but not cycle-stable. `clear()`
+is a reset-and-move-on operation, not a steady-state recycling primitive. See
+`decisions/0003-locale-bounds.md`.
 
 ---
 
