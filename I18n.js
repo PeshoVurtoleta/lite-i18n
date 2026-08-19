@@ -17,7 +17,7 @@
 import { signal } from "@zakkster/lite-signal";
 
 // Four-place version sync: package.json, this const, I18n.d.ts and llms.txt move together.
-export const VERSION = "1.2.0";
+export const VERSION = "1.2.1";
 
 // Per-instance ceiling for every per-locale structure keyed on an untrusted
 // string (_readySignals, _pluralRules, _ordinalRules). Sized well under
@@ -36,12 +36,23 @@ const WARN_BUDGET = 32;
 // ---------- Token types ----------
 // 0: literal string
 // 1: {key} interpolation slot
-// 2: {var, plural, ...} inline plural block
-// Sub-templates inside plural variants use only types 0 and 1; the ICU '#'
-// shortcut compiles to {type: 1, key: <plural variable>}.
+// 2: {var, plural, ...} / {var, selectordinal, ...} inline plural block
+// 3: {var, select, ...} inline string-keyed select block
+// The ICU '#' shortcut compiles to {type: 1, key: <plural variable>}.
+// Sub-templates are NOT restricted to types 0 and 1: a plural/select/
+// selectordinal block nests freely inside any variant (I-06, v1.2.1 -- the
+// nesting law is pinned by torture T0, not by prose). Nesting depth is capped
+// at compile time; see MAX_TEMPLATE_DEPTH and MessageDepthError.
 
 const CLDR_KEYS = new Set(["zero", "one", "two", "few", "many", "other"]);
 const EXACT_RE = /^=(\d+)$/;
+
+// I-07 (v1.2.1): cap argument-block nesting at compile time. 32 is far above any
+// real message (a two- or three-axis plural is already exotic) and far below the
+// V8 call stack the uncapped recursive tokenizer used to hit -- so a dictionary
+// built from a translation file throws a NAMED error naming the key and the
+// depth, never a bare anonymous RangeError from deep in the parser.
+const MAX_TEMPLATE_DEPTH = 32;
 
 // ---------- Errors ----------
 export class MissingKeyError extends Error {
@@ -70,6 +81,25 @@ export class LocaleCapacityError extends Error {
         this.name = "LocaleCapacityError";
         this.locale = locale;
         this.ceiling = ceiling;
+    }
+}
+
+// Thrown at define time when a message nests argument blocks past
+// MAX_TEMPLATE_DEPTH (I-07, v1.2.1). Extends SyntaxError so it groups with every
+// other compile-time template failure, but carries the offending key and the
+// depth reached -- the uncapped tokenizer used to bottom out in a bare
+// `RangeError: Maximum call stack size exceeded` naming nothing. The staging Map
+// in internalDefine guarantees the live dict is byte-identical after the throw.
+export class MessageDepthError extends SyntaxError {
+    constructor(key, depth) {
+        super(
+            `lite-i18n: message "${key}" nests argument blocks ${depth} deep, ` +
+            `past the limit of ${MAX_TEMPLATE_DEPTH}. Split it into separate keys; ` +
+            `a plural/select block that deep is almost always a runaway template.`
+        );
+        this.name = "MessageDepthError";
+        this.key = key;
+        this.depth = depth;
     }
 }
 
@@ -125,23 +155,26 @@ function findMatchingBrace(s, start) {
  *
  *  Forward-declared at module level -- compilePluralToken and
  *  compileSelectToken are defined below; function declarations are hoisted. */
-function parseArgument(inner) {
+function parseArgument(inner, key, depth) {
     const pm = /^\s*(\w+)\s*,\s*(plural|selectordinal|select)\s*,\s*([\s\S]+)$/.exec(inner);
     if (pm) {
+        // I-07: enforce the nesting cap BEFORE descending, so the parser never
+        // recurses deep enough to hit the raw stack RangeError.
+        if (depth > MAX_TEMPLATE_DEPTH) throw new MessageDepthError(key, depth);
         const kind = pm[2];
-        if (kind === "select") return compileSelectToken(pm[1], pm[3]);
-        return compilePluralToken(pm[1], pm[3], kind === "selectordinal");
+        if (kind === "select") return compileSelectToken(pm[1], pm[3], key, depth);
+        return compilePluralToken(pm[1], pm[3], kind === "selectordinal", key, depth);
     }
-    const key = inner.trim();
+    const slotKey = inner.trim();
     // Bare identifier is a slot. Anything with a comma is an unsupported
     // ICU shape ({n, number}, {d, date}, etc.) -- fail loudly.
-    if (key.indexOf(",") !== -1) {
+    if (slotKey.indexOf(",") !== -1) {
         throw new SyntaxError(
             `Unsupported ICU argument "{${inner}}". lite-i18n supports {slot}, {var, plural, ...}, {var, selectordinal, ...}, {var, select, ...}. ` +
             `For number/date/list/relative-time formatting use the Format entry (formatNumber, formatDate, ...).`
         );
     }
-    return { type: 1, key };
+    return { type: 1, key: slotKey };
 }
 
 /** Tokenize a top-level message template.
@@ -153,7 +186,7 @@ function parseArgument(inner) {
  *    '{name}'        -- literal '{name}' (whole slot escaped)
  *    ''              -- literal apostrophe
  *  Any apostrophe NOT followed by { } or ' is a literal apostrophe. */
-function tokenizeMessage(template) {
+function tokenizeMessage(template, key) {
     const tokens = [];
     const len = template.length;
     let literal = "";
@@ -191,7 +224,8 @@ function tokenizeMessage(template) {
             if (literal) { tokens.push({ type: 0, str: literal }); literal = ""; }
             const close = findMatchingBrace(template, i);
             const inner = template.slice(i + 1, close);
-            tokens.push(parseArgument(inner));
+            // Top-level argument block: depth 1.
+            tokens.push(parseArgument(inner, key, 1));
             i = close + 1;
             continue;
         }
@@ -207,7 +241,7 @@ function tokenizeMessage(template) {
  *  Same ICU quoted-string mode as tokenizeMessage, plus '#' as a quote-opener:
  *    '#'      -- three chars: opens quote, #, closes quote  -> literal '#'
  *    '#more'  -- literal '#more' */
-function tokenizeSub(template, pluralVariable) {
+function tokenizeSub(template, pluralVariable, key, depth) {
     const tokens = [];
     const len = template.length;
     let literal = "";
@@ -248,7 +282,8 @@ function tokenizeSub(template, pluralVariable) {
             if (literal) { tokens.push({ type: 0, str: literal }); literal = ""; }
             const close = findMatchingBrace(template, i);
             const inner = template.slice(i + 1, close);
-            tokens.push(parseArgument(inner));
+            // A block found inside this sub-template is one level deeper.
+            tokens.push(parseArgument(inner, key, depth + 1));
             i = close + 1;
             continue;
         }
@@ -262,7 +297,7 @@ function tokenizeSub(template, pluralVariable) {
 /** Compile an inline plural block. `ordinal` selects between cardinal
  *  (Intl.PluralRules) and ordinal (Intl.PluralRules { type: "ordinal" })
  *  category selection at render time. */
-function compilePluralToken(variable, body, ordinal) {
+function compilePluralToken(variable, body, ordinal, key, depth) {
     const exact = new Map();
     const variants = new Map();
     const len = body.length;
@@ -300,7 +335,7 @@ function compilePluralToken(variable, body, ordinal) {
             throw new SyntaxError(`Expected '{' after plural selector "${sel}"`);
         }
         const close = findMatchingBrace(body, i);
-        const subTokens = tokenizeSub(body.slice(i + 1, close), variable);
+        const subTokens = tokenizeSub(body.slice(i + 1, close), variable, key, depth);
         const em = EXACT_RE.exec(sel);
         if (em) {
             exact.set(+em[1], subTokens);
@@ -325,7 +360,7 @@ function compilePluralToken(variable, body, ordinal) {
 /** Compile a select block: string-keyed dispatch via params[variable], with
  *  a required 'other' fallback. Cheaper than plural at runtime -- no
  *  PluralRules constructor, no locale dependency for selection. */
-function compileSelectToken(variable, body) {
+function compileSelectToken(variable, body, key, depth) {
     const variants = new Map();
     const len = body.length;
     let i = 0;
@@ -349,7 +384,7 @@ function compileSelectToken(variable, body) {
             throw new SyntaxError(`Expected '{' after select selector "${sel}"`);
         }
         const close = findMatchingBrace(body, i);
-        const subTokens = tokenizeSub(body.slice(i + 1, close), variable);
+        const subTokens = tokenizeSub(body.slice(i + 1, close), variable, key, depth);
         variants.set(sel, subTokens);
         i = close + 1;
     }
@@ -360,6 +395,55 @@ function compileSelectToken(variable, body) {
 }
 
 // ---------- Renderer ----------
+
+// I-08 (v1.2.1): normalize a plural/selectordinal selector ONCE so the exact
+// bucket (a number-keyed Map -- `exact.get(1)` hits, `exact.get('1')` misses)
+// and the category path (Intl.PluralRules.select) see the SAME value. Without
+// this, `count: 1` and `count: '1'` render two different sentences for the same
+// logical value -- a form input hands you '1', a counter hands you 1.
+//
+// This is NOT a bare Number(): that maps null -> 0 and '' -> 0, so under an
+// author-written `=0` bucket it would render that ZERO literal for a blank or
+// nullish count. `null` is not zero (suite law), and neither is a blank string.
+// So:
+//   number   -> unchanged (NaN stays NaN)
+//   bigint   -> Number(v): a BigInt is a determined numeric count, and coercing
+//               it here makes `count: 2n` render like `count: 2` AND keeps the
+//               raw `TypeError: Cannot convert a BigInt value to a number` that
+//               Intl's own ToNumber used to throw completely unreachable.
+//   string   -> the numeric value if it parses ('1' -> 1, '0' -> 0, '1e3' ->
+//               1000, ' 5 ' -> 5); a BLANK string (empty or all-whitespace) and
+//               a non-numeric string stay as-is, MISSING the number-keyed `=N`
+//               buckets.
+//   null/undefined/anything else -> unchanged, also missing the `=N` buckets.
+// A value left as-is (blank/null/undefined/NaN/non-numeric) never triggers the
+// author's `=N` literal; it falls to the CLDR category selector, where
+// Intl.PluralRules applies its OWN coercion (`other` in a no-`zero`-category
+// locale like English; the locale's `zero` category in e.g. Arabic; `undefined`
+// -> NaN -> `other` everywhere). The `=N` buckets are only ever hit by real
+// numeric values and numeric strings. See decisions/0004-count-coercion.md.
+//
+// The whole guard is one typeof and, only for strings, one blank-scan + one
+// ToNumber; the number passthrough (the hot path) is untouched. The blank scan
+// avoids `.trim()`, which would allocate -- a real number's chars are all above
+// 0x20, so the first charCode > 0x20 proves the string is non-blank.
+function coerceCount(v) {
+    const tp = typeof v;
+    if (tp === "number") return v;
+    if (tp === "bigint") return Number(v);
+    if (tp === "string") {
+        // Blank (empty or all-whitespace) stays OUT of the number bucket: blank
+        // is not zero. No .trim() -- scan for the first non-whitespace charCode.
+        let blank = true;
+        for (let i = 0; i < v.length; i++) {
+            if (v.charCodeAt(i) > 32) { blank = false; break; }
+        }
+        if (blank) return v;
+        const n = +v;
+        return n === n ? n : v;              // NaN (non-numeric) stays as-is
+    }
+    return v;                                // null/undefined/boolean/object -> unchanged
+}
 
 // The plural rules cache lives on the instance -- this renderer receives the
 // instance-scoped getter so different instances don't cross-pollute caches.
@@ -386,12 +470,14 @@ function renderTokens(tokens, params, locale, getRules) {
         } else if (type === 2) {
             const vkey = t.variable;
             const nVal = Object.hasOwn(params, vkey) ? params[vkey] : undefined;
-            const ex = t.exact.get(nVal);
+            // I-08: one normalization feeds BOTH exact and category dispatch.
+            const cVal = coerceCount(nVal);
+            const ex = t.exact.get(cVal);
             if (ex !== undefined) {
                 out += renderTokens(ex, params, locale, getRules);
             } else {
                 const rules = getRules(locale, t.ordinal);
-                const sel = rules.select(nVal);
+                const sel = rules.select(cVal);
                 const variant = t.variants.get(sel) || t.variants.get("other");
                 out += renderTokens(variant, params, locale, getRules);
             }
@@ -412,7 +498,7 @@ function renderTokens(tokens, params, locale, getRules) {
 // static strings through a closure too so the lookup site has a monomorphic
 // call shape.
 
-function compileString(template) {
+function compileString(template, key) {
     // Pure literal fast-path. Skip only when the template has none of the
     // characters that could introduce syntax: '{' opens slots/plurals, '#'
     // is the plural shorthand, and "'" may open an ICU quoted section.
@@ -423,7 +509,7 @@ function compileString(template) {
         fn.pluralVar = null;
         return fn;
     }
-    const tokens = tokenizeMessage(template);
+    const tokens = tokenizeMessage(template, key);
     // If tokenizer collapsed to a single literal, specialize.
     if (tokens.length === 1 && tokens[0].type === 0) {
         const s = tokens[0].str;
@@ -473,7 +559,7 @@ function isPluralObj(v) {
 
 /** Compile a plural-object dict entry `{ one: '...', other: '...', =0: '...' }`.
  *  The variable is implicitly `count`. */
-function compilePluralObj(obj) {
+function compilePluralObj(obj, key) {
     const exact = new Map();
     const variants = new Map();
     const keys = Object.keys(obj);
@@ -483,7 +569,8 @@ function compilePluralObj(obj) {
         // isPluralObj already guarantees string values, but assert defensively --
         // this is the last line between a bad shape and a runtime TypeError.
         if (typeof v !== "string") continue;
-        const sub = tokenizeSub(v, "count");
+        // A plural-object entry is itself one argument-block level: depth 1.
+        const sub = tokenizeSub(v, "count", key, 1);
         const em = EXACT_RE.exec(k);
         if (em) exact.set(+em[1], sub);
         else variants.set(k, sub);
@@ -494,10 +581,12 @@ function compilePluralObj(obj) {
     const fn = function (params, locale, getRules) {
         const p = params || EMPTY_PARAMS;
         const nVal = Object.hasOwn(p, "count") ? p.count : undefined;
-        const ex = exact.get(nVal);
+        // I-08: normalize once, feed both exact and category dispatch.
+        const cVal = coerceCount(nVal);
+        const ex = exact.get(cVal);
         if (ex !== undefined) return renderTokens(ex, p, locale, getRules);
         const rules = getRules(locale);
-        const sel = rules.select(nVal);
+        const sel = rules.select(cVal);
         const variant = variants.get(sel) || variants.get("other");
         return renderTokens(variant, p, locale, getRules);
     };
@@ -519,10 +608,10 @@ function flattenInto(dict, prefix, out) {
         const v = dict[k];
         const path = prefix ? prefix + "." + k : k;
         if (typeof v === "string") {
-            out.set(path, compileString(v));
+            out.set(path, compileString(v, path));
         } else if (v !== null && typeof v === "object" && !Array.isArray(v)) {
             if (isPluralObj(v)) {
-                out.set(path, compilePluralObj(v));
+                out.set(path, compilePluralObj(v, path));
             } else {
                 flattenInto(v, path, out);
             }
@@ -619,6 +708,7 @@ export function createI18n(config) {
     const _ordinalRules = new Map();             // locale -> Intl.PluralRules (ordinal)
     const _readySignals = new Map();             // locale -> signal<bool>
     const _loadPromises = new Map();             // locale -> Promise<void>
+    const _supersededLoads = new Set();          // locale -> an explicit define cancelled this in-flight load (I-05)
     const _fallback = [];
     let _missingKeyPolicy = cfg.missingKeyPolicy || "key";
     let _onMissingKey = cfg.onMissingKey || null;
@@ -708,7 +798,15 @@ export function createI18n(config) {
     function defineMessages(loc, dict) {
         if (typeof loc !== "string") throw new TypeError("defineMessages: locale must be a string");
         if (!dict || typeof dict !== "object") throw new TypeError("defineMessages: dict must be an object");
+        // I-05 (v1.2.1): an explicit defineMessages is the synchronous, intentional
+        // writer -- it WINS over any load already in flight for this locale. Mark
+        // the load superseded AFTER internalDefine commits (a bad template throws
+        // and must NOT cancel the load). The load's success handler then discards
+        // its result with a named warn, and its promise resolves rather than
+        // rejects. Ordering is decided; see decisions/0006-load-define-race.md.
+        const hadLoad = _loadPromises.has(loc);
         internalDefine(loc, dict);
+        if (hadLoad) _supersededLoads.add(loc);
     }
 
     function lookup(key, loc) {
@@ -846,6 +944,7 @@ export function createI18n(config) {
         _pluralRules.clear();
         _ordinalRules.clear();
         _loadPromises.clear();
+        _supersededLoads.clear();
         for (const [, rs] of _readySignals) {
             if (rs.peek()) rs.set(false);
         }
@@ -866,6 +965,9 @@ export function createI18n(config) {
         // Load in flight -> return the shared promise.
         const inflight = _loadPromises.get(loc);
         if (inflight) return inflight;
+        // A fresh load is never superseded by a PAST define (the marks and the
+        // promises are cleared together, so this is defensive, not load-bearing).
+        _supersededLoads.delete(loc);
         // Defer the loader invocation. A sync throw inside loaderFn would
         // otherwise run the catch BEFORE _loadPromises.set below, meaning
         // the delete cleanup hits an empty map and the rejected promise then
@@ -878,7 +980,24 @@ export function createI18n(config) {
             function (dict) {
                 if (!dict || typeof dict !== "object") {
                     _loadPromises.delete(loc);
+                    _supersededLoads.delete(loc);
                     throw new TypeError(`loadLocale("${loc}"): loader must return an object`);
+                }
+                // I-05: a defineMessages for this locale landed while the load was
+                // in flight. The intentional writer already won -- discard the
+                // load result (do NOT internalDefine), make the LOSING writer
+                // observable, and RESOLVE (the caller asked to load; the locale is
+                // loaded, just not from here).
+                if (_supersededLoads.has(loc)) {
+                    _supersededLoads.delete(loc);
+                    _loadPromises.delete(loc);
+                    if (typeof console !== "undefined" && console.warn) {
+                        console.warn(
+                            `[lite-i18n] loadLocale("${loc}"): result discarded -- a ` +
+                            `defineMessages("${loc}") superseded this load while it was ` +
+                            `in flight. The synchronous define wins.`);
+                    }
+                    return;
                 }
                 internalDefine(loc, dict);
                 // Clear on success: _dicts.has(loc) fast-path covers dedup
@@ -887,6 +1006,7 @@ export function createI18n(config) {
             },
             function (err) {
                 _loadPromises.delete(loc);
+                _supersededLoads.delete(loc);
                 throw err;
             }
         );

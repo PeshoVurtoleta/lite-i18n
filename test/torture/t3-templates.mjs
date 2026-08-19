@@ -6,13 +6,14 @@
  * template is pinned to a NAMED error at define time. Atomicity: a bad template
  * mid-batch leaves the dict byte-identical (the staging Map guarantee).
  *
- * Note (I-07): the depth bomb throws a raw RangeError from the recursive
- * tokenizer, NOT a named library error. That is pinned here as the CURRENT
- * behaviour; I3 (v1.2.1) caps depth and throws a named SyntaxError, at which
- * point this pin changes deliberately.
+ * Note (I-07, FIXED v1.2.1): the depth bomb now throws a NAMED MessageDepthError
+ * (a SyntaxError subclass carrying the key and the depth), capped at compile time
+ * at MAX_TEMPLATE_DEPTH = 32 -- never the bare RangeError the uncapped recursive
+ * tokenizer used to bottom out in. The staging Map leaves the live dict
+ * byte-identical after the throw, asserted below rather than assumed.
  */
 
-import { createI18n } from "../../I18n.js";
+import { createI18n, MessageDepthError } from "../../I18n.js";
 import { check } from "./harness.mjs";
 
 function throwsDefine(dict, name, label) {
@@ -63,10 +64,52 @@ export async function run() {
     throwsDefine({ k: "{n, plural, others_ {x} other {y}}" }, "SyntaxError", "selector typo others_");
     throwsDefine({ k: "{g, select, male {x}}" }, "SyntaxError", "select missing other");
     throwsDefine(null, "TypeError", "null dict");
-    // I-07: raw RangeError from the recursive tokenizer (unnamed today).
+    // I-07 (v1.2.1): a depth bomb throws a NAMED MessageDepthError carrying the
+    // key and the depth, capped at compile time -- not a bare stack RangeError.
     let bomb = "x";
     for (let d = 0; d < 4000; d++) bomb = "{n, plural, other {" + bomb + "}}";
-    throwsDefine({ k: bomb }, "RangeError", "depth bomb (I-07, unnamed today)");
+    throwsDefine({ k: bomb }, "MessageDepthError", "depth bomb (I-07, named + capped)");
+    {
+        // The named error carries the offending key and the depth reached, and
+        // the cap fires far below the stack (never a RangeError).
+        const inst = createI18n({ locale: "en" });
+        let err = null;
+        try { inst.defineMessages("en", { deep: bomb }); } catch (e) { err = e; }
+        check(err instanceof MessageDepthError,
+            () => `T3: depth bomb threw ${err && err.name}, want MessageDepthError`);
+        check(err.key === "deep",
+            () => `T3: MessageDepthError did not name the key: ${JSON.stringify(err.key)}`);
+        check(typeof err.depth === "number" && err.depth > 32,
+            () => `T3: MessageDepthError did not carry a depth > 32: ${JSON.stringify(err.depth)}`);
+    }
+    {
+        // Byte-identical dict after a depth throw (the staging Map guarantee,
+        // asserted not assumed). A good key committed first must survive, and
+        // stats() must be unchanged by the failed define.
+        const inst = createI18n({ locale: "en" });
+        inst.defineMessages("en", { keep: "KEEP {v}" });
+        const before = JSON.stringify(inst.stats());
+        const rendered = inst.t("keep", { v: 1 });
+        let threw = false;
+        try { inst.defineMessages("en", { bombed: bomb }); } catch { threw = true; }
+        check(threw, () => `T3: depth bomb did not throw at define`);
+        check(JSON.stringify(inst.stats()) === before,
+            () => `T3: stats() changed after a depth throw -- dict not byte-identical`);
+        check(inst.t("keep", { v: 1 }) === rendered,
+            () => `T3: a prior key changed after a depth throw`);
+        check(inst.t("bombed") === "bombed",
+            () => `T3: the bombed key committed despite the throw`);
+    }
+    // Depth 32 is accepted; depth 33 is the first rejected -- the boundary is
+    // exact, not approximate.
+    {
+        const inst = createI18n({ locale: "en" });
+        const wrap = (n) => { let s = "deep"; for (let d = 0; d < n; d++) s = "{n, plural, other {" + s + "}}"; return s; };
+        let ok32 = true;
+        try { inst.defineMessages("en", { d32: wrap(32) }); } catch { ok32 = false; }
+        check(ok32, () => `T3: a 32-deep message was rejected -- the cap is too tight`);
+        throwsDefine({ d33: wrap(33) }, "MessageDepthError", "depth 33 (one past the cap)");
+    }
 
     // Non-string locale is a TypeError regardless of dict.
     {

@@ -68,6 +68,29 @@ export async function run() {
     check(innerPlural === "3 files",
         () => `T0: inner plural rendered "${innerPlural}"`);
 
+    // I-06 (v1.2.1): the nesting law, pinned by ASSERTION rather than by the
+    // README paragraph that denied it and drifted for a release. Every axis of
+    // the select branch selects, and the inner plural's `one`/`other` split
+    // resolves independently -- prove both branches AND both inner categories.
+    const nestLaw = createI18n({ locale: "en" });
+    nestLaw.defineMessages("en", {
+        // select -> plural, and a plural -> select the other way, both nested.
+        sp: "{g, select, male {{n, plural, one {a {n} apple} other {# apples}}} female {{n, plural, one {her apple} other {# apples}}} other {none}}",
+        ps: "{n, plural, one {{g, select, male {his 1} other {their 1}}} other {# of {g, select, male {his} other {their}}}}",
+    });
+    check(nestLaw.t("sp", { g: "male", n: 1 }) === "a 1 apple",
+        () => `T0 I-06: select>plural one-branch rendered "${nestLaw.t("sp", { g: "male", n: 1 })}"`);
+    check(nestLaw.t("sp", { g: "male", n: 4 }) === "4 apples",
+        () => `T0 I-06: select>plural other-branch rendered "${nestLaw.t("sp", { g: "male", n: 4 })}"`);
+    check(nestLaw.t("sp", { g: "female", n: 1 }) === "her apple",
+        () => `T0 I-06: select>plural female-branch rendered "${nestLaw.t("sp", { g: "female", n: 1 })}"`);
+    check(nestLaw.t("sp", { g: "x", n: 9 }) === "none",
+        () => `T0 I-06: select>plural fallthrough rendered "${nestLaw.t("sp", { g: "x", n: 9 })}"`);
+    check(nestLaw.t("ps", { n: 1, g: "male" }) === "his 1",
+        () => `T0 I-06: plural>select one-branch rendered "${nestLaw.t("ps", { n: 1, g: "male" })}"`);
+    check(nestLaw.t("ps", { n: 5, g: "other" }) === "5 of their",
+        () => `T0 I-06: plural>select other-branch rendered "${nestLaw.t("ps", { n: 5, g: "other" })}"`);
+
     // KNOWN-FAILING, scoped (I-15, S2): the plural()-merge form of the SAME
     // nesting does NOT hold today. compileString scans TOP-LEVEL tokens only for
     // the plural variable (see compileString's pluralVar scan); in a nested template the top-level

@@ -179,15 +179,19 @@ monomorphic.
                               "Hello, Zahary!"
 ```
 
-Compiled entries produce three token shapes:
+Compiled entries produce four token shapes:
 
 - **Type 0 (literal)** -- `{ str: "Hello, " }`.
 - **Type 1 (slot)** -- `{ key: "name" }`. Splices `params[key]` at runtime.
-- **Type 2 (plural)** -- `{ variable, exact: Map<number, tokens>, variants: Map<selector, tokens> }`.
+- **Type 2 (plural / selectordinal)** -- `{ variable, exact: Map<number, tokens>, variants: Map<selector, tokens>, ordinal }`.
+- **Type 3 (select)** -- `{ variable, variants: Map<selector, tokens> }`. String-keyed dispatch, no `Intl.PluralRules`.
 
 The `#` shortcut in plural sub-templates compiles to a type-1 slot pointing
-at the plural variable. Sub-templates never contain nested plurals -- if you
-need multi-axis plurals, split the message.
+at the plural variable. Sub-templates DO nest: a plural, select or selectordinal
+block composes freely inside any variant (`{g, select, male {{n, plural, one
+{# apple} other {# apples}}} other {none}}`), so multi-axis plurals need no
+splitting. Nesting depth is capped at compile time (32 levels) and a deeper
+message throws a named `MessageDepthError` naming the key and the depth.
 
 ---
 

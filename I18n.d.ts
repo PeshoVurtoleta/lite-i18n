@@ -30,14 +30,15 @@ export interface MessageDict {
 /**
  * Parameters passed to `t` and `plural`. Values are stringified on splice.
  *
- * `bigint` is intentionally NOT in this union (I-17, v1.1.4). A bigint renders
- * fine in a `{slot}`, but a bigint reaching a plural/selectordinal variable
- * throws `TypeError: Cannot convert a BigInt value to a number` out of
- * `Intl.PluralRules.select`. The type was narrowed rather than coercing at the
- * selector, because coercion is entangled with the (separate) `=N`-vs-category
- * string-count asymmetry. Convert bigints yourself: `t(k, { n: Number(big) })`.
+ * `bigint` is accepted (I-08, v1.2.1). It renders in a `{slot}` (stringified)
+ * and, reaching a plural/selectordinal variable, is normalized via `Number()`
+ * before `Intl.PluralRules.select` so `count: 2n` renders like `count: 2` and
+ * never throws out of Intl. This reverses the I-17 (v1.1.4) narrowing, which was
+ * blocked on the `=N`-vs-category string-count asymmetry that I-08 resolved:
+ * numeric strings normalize too (`'1'` matches `=1` like `1`), while `null`,
+ * `undefined` and `''` stay in the `other` path -- `null` is not zero.
  */
-export type MessageParams = Record<string, string | number | boolean>;
+export type MessageParams = Record<string, string | number | boolean | bigint>;
 
 export interface I18nConfig {
     /** Initial locale. Default `"en"`. */
@@ -163,6 +164,19 @@ export class LocaleCapacityError extends Error {
     readonly locale: string;
     readonly ceiling: number;
     constructor(locale: string, ceiling: number);
+}
+
+/**
+ * Thrown at define time (I-07, v1.2.1) when a message nests argument blocks
+ * deeper than 32 levels. Extends `SyntaxError` (it groups with every other
+ * compile-time template failure) but carries the offending `key` and the `depth`
+ * reached, replacing the bare `RangeError: Maximum call stack size exceeded` the
+ * uncapped tokenizer used to throw. The dict is byte-identical after the throw.
+ */
+export class MessageDepthError extends SyntaxError {
+    readonly key: string;
+    readonly depth: number;
+    constructor(key: string, depth: number);
 }
 
 /**

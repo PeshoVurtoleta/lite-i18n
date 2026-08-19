@@ -10,7 +10,7 @@
 //
 //   I-01 -> FIXED in I1 (v1.1.4)   prototype pollution no longer selects a variant
 //   I-03 -> FIXED in I2 (v1.2.0)   ready() no longer exhausts the lite-signal pool
-//   I-05 -> I3 (v1.2.1)   loadLocale overwrites a later defineMessages
+//   I-05 -> FIXED in I3 (v1.2.1)   an explicit define beats an in-flight load
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -70,18 +70,31 @@ test("I-03: ready() is bounded and fails closed (fixed v1.2.0)", () => {
     assert.equal(j.t("k"), "v", "a fresh instance works -- the shared pool was not exhausted");
 });
 
-// I-05 (S2). A load in flight for 'fr', then a synchronous, intentional
-// defineMessages('fr', ...), then the loader resolves: the async writer wins,
-// silently, across the await boundary.
-test("I-05: an in-flight load overwrites a later define (I3 must flip this)", async () => {
+// I-05 (S2, FIXED v1.2.1). A load in flight for 'fr', then a synchronous,
+// intentional defineMessages('fr', ...), then the loader resolves. DECIDED
+// POLICY (decisions/0006-load-define-race.md): the synchronous, intentional
+// writer WINS -- the explicit define supersedes the in-flight load's commit. The
+// load's result is DISCARDED (not silently: a named console.warn makes the
+// losing writer observable), and the promise RESOLVES rather than rejects. This
+// pin was flipped from "from-loader" (the reproduced bug) to "from-define".
+test("I-05: an explicit define beats an in-flight load (fixed v1.2.1)", async () => {
     const i = createI18n({ locale: "fr" });
-    const p = i.loadLocale("fr", () => new Promise((res) => setTimeout(() => res({ k: "from-loader" }), 10)));
-    i.defineMessages("fr", { k: "from-define" });
-    assert.equal(i.t("k"), "from-define", "the synchronous define should be visible immediately");
-    await p;
-    // PINNED BUG: the async loader silently overwrote the explicit define. When
-    // I3 makes the synchronous writer win, this becomes "from-define" -- flip it.
-    assert.equal(
-        i.t("k"), "from-loader",
-        "I-05 no longer reproduces: I3 (v1.2.1) fixed the write race -- flip this pin to 'from-define'");
+    const warnings = [];
+    const _warn = console.warn;
+    console.warn = (m) => warnings.push(String(m));
+    let p;
+    try {
+        p = i.loadLocale("fr", () => new Promise((res) => setTimeout(() => res({ k: "from-loader" }), 10)));
+        i.defineMessages("fr", { k: "from-define" });
+        assert.equal(i.t("k"), "from-define", "the synchronous define should be visible immediately");
+        await p; // resolves, does not reject
+    } finally {
+        console.warn = _warn;
+    }
+    // The intentional writer won and the load result was discarded.
+    assert.equal(i.t("k"), "from-define", "I-05 fixed: the synchronous define wins over the in-flight load");
+    // The losing writer is observable: exactly one named discard warning.
+    assert.equal(warnings.length, 1, "the discarded load must emit exactly one warning");
+    assert.match(warnings[0], /result discarded/, "the warning must name the discard");
+    assert.match(warnings[0], /"fr"/, "the warning must name the superseded locale");
 });

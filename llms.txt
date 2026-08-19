@@ -139,6 +139,24 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.2.1** (2026-08-19, define-time + dispatch-time law). Four define/dispatch
+  questions that had no written answer, so the same value could render two
+  sentences. I-08: the plural selector is now normalized ONCE (coerceCount)
+  before both the number-keyed `=N` exact map and `Intl.PluralRules.select`, so
+  `count: '1'` renders identically to `count: 1` (and `'0'` like `0`); a BigInt
+  is `Number()`-coerced instead of throwing an unnamed TypeError out of Intl;
+  `null`, `''` and `undefined` deliberately stay in the `other` path -- `null`
+  is not zero, so they must NOT fall into an `=0` bucket
+  (decisions/0004-count-coercion.md). I-07: argument-block nesting is capped at
+  compile time (`MAX_TEMPLATE_DEPTH` = 32) and throws a NAMED `MessageDepthError`
+  carrying the key and depth, never a bare stack `RangeError`; the staging Map
+  leaves the dict byte-identical after the throw (decisions/0005-depth-cap.md).
+  I-05: an explicit `defineMessages` for a locale with a load in flight now WINS
+  -- it supersedes the load's commit, the load result is discarded with a named
+  `console.warn` (the losing writer is observable), and the promise resolves
+  rather than rejects (decisions/0006-load-define-race.md). I-06: docs reconciled
+  -- four token shapes (select is type 3), and nested plural/select is supported.
+  No new API surface; no runtime dependency.
 - **1.2.0** (2026-08-16, bounded caches + eviction). Every per-locale structure
   was unbounded and nothing released one; the three fail in OPPOSITE directions,
   so they take DIFFERENT policies (decisions/0003-locale-bounds.md). I-03:
@@ -414,6 +432,20 @@ Constraints enforced at compile time:
 Runtime coercion:
 - Nullish (`undefined` or `null`) slot values render as `""` (nullish coalesce
   on the hot path). Numeric zero and empty string render normally.
+- Plural/selectordinal selector (v1.2.1, I-08): normalized ONCE before both the
+  number-keyed `=N` exact map and `Intl.PluralRules.select`, so a value renders
+  the same sentence regardless of its JS type. A numeric string coerces to its
+  number (`'1'` matches `=1` like `1`; `'0'` matches `=0` like `0`, `' 5 '` ->
+  5); a `bigint` coerces via `Number()` (so `2n` renders like `2`, never throwing
+  out of Intl). An absent, `null`, `undefined`, or BLANK (empty or
+  whitespace-only) count deliberately does NOT enter the number bucket -- blank
+  is not zero -- so it MISSES the author-written `=N` exact buckets and never
+  triggers the `=0 {...}` literal the translator wrote. It then falls to the CLDR
+  category selector, where `Intl.PluralRules` applies its OWN coercion: `other` in
+  a locale with no `zero` category (e.g. English), or the locale's `zero` category
+  otherwise (e.g. Arabic); `undefined` -> NaN -> `other` in every locale. The
+  `=N` buckets are only ever hit by real numeric values and numeric strings
+  (decisions/0004-count-coercion.md).
 - EVERY read site uses `Object.hasOwn`, not just slots: the `{slot}`, the `#`
   inside a plural variant, the `{var, plural, ...}` / `{var, selectordinal, ...}`
   variable, the `{var, select, ...}` variable, and the plural-object `count`. So

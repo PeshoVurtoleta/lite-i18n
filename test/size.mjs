@@ -31,7 +31,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 //                    gzipped source   code-only (comments stripped)
 //   5d271ef                8943 B                  4637 B
 //   v1.2.0                11718 B                  5410 B
-//   growth                +2775 B                  + 773 B   <- 72% is comments
+//   v1.2.1                13823 B                  5972 B
+//   1.2.0 -> 1.2.1        +2105 B                  + 562 B   <- 73% is comments
 //
 // "Comments stripped" means: remove /* */ blocks, drop whole-line // comments,
 // collapse the resulting blank-line runs. State the method wherever the split is
@@ -39,18 +40,22 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // the first draft of this note drifted (it was measured at gzip's DEFAULT level,
 // not level 9, and read 8974/11653).
 //
-// So the metric measures GZIPPED SOURCE and only +773 B of the growth is CODE --
-// proportionate for resolveLocale + unloadLocale + clear + LocaleCapacityError +
-// bounded caches + eviction + the warn budget + three stats() fields. The other
-// 72% is docstrings, which suite law mandates and which cost ZERO shipped bytes
+// So the metric measures GZIPPED SOURCE and most of each bump is docstrings, not
+// code: v1.2.0 added +773 B code (resolveLocale + unloadLocale + clear +
+// LocaleCapacityError + bounded caches + eviction + the warn budget + three
+// stats() fields); v1.2.1 added +562 B code (coerceCount + MAX_TEMPLATE_DEPTH +
+// MessageDepthError + the depth threading + the define/load supersession) against
+// +1543 B of comments. Docstrings are suite-mandated and cost ZERO shipped bytes
 // after minification. Shrinking comments to fit a source-bytes proxy would
 // optimize the measurement, not the artifact (the I-10 pathology), so the budget
-// moves instead: 13312 B = measured 11718 + ~14% headroom, the same proportional
-// margin the original 10240 held over its measurement. The metric's own blind
-// spot -- it taxes comment density and cannot see true min+gz -- is filed as
-// I-20 (roadmap S3, assigned I7) next to I-13/I-18.
+// moves instead, holding the SAME ~14% proportional margin at every step:
+//   10240 over its measurement  ~14%
+//   13312 = 11718 + ~14%   (v1.2.0, 13.6%)
+//   15750 = 13823 + ~14%   (v1.2.1, 13.9%)
+// The metric's own blind spot -- it taxes comment density and cannot see true
+// min+gz -- is filed as I-20 (roadmap S3, assigned I7) next to I-13/I-18.
 const BUDGETS = [
-    { file: "I18n.js", gzBudget: 13312 },
+    { file: "I18n.js", gzBudget: 15750 },
     { file: "Format.js", gzBudget: 2560 },
 ];
 

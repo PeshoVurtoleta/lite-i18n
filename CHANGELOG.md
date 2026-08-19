@@ -2,6 +2,100 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.2.1 -- 2026-08-19 (define-time + dispatch-time law)
+
+Four define-time and dispatch-time questions had no written answer, so the same
+value could render two different sentences and nothing said which was right. Each
+is small; together they are the contract `/lint` and precompiled dicts will both
+need. Two were worse than the roadmap framed them: I-07 had NO cap at all (the
+real failure was a bare `RangeError` from the parser), and I-08's BigInt row
+threw an UNNAMED `TypeError` out of `Intl`, mid-render, in production.
+
+### Fixed
+
+- **I-08 (silent + fail-loud): a plural count rendered a different sentence
+  depending on its JS type, and a BigInt threw out of Intl.** The exact bucket is
+  a number-keyed `Map` (`=1` -> key `1`), so `exact.get('1')` MISSED while
+  `exact.get(1)` HIT -- `count: '1'` dropped to the `one` category and
+  `count: 1` hit `=1`, two sentences for one logical value (a form input hands
+  you `'1'`, a counter hands you `1`). And `count: 2n` threw
+  `TypeError: Cannot convert a BigInt value to a number` from inside
+  `Intl.PluralRules`, with no key/locale/package in the message. Fixed: the
+  selector is normalized ONCE (`coerceCount`) before BOTH `exact.get` and
+  `select`, so a value renders the same sentence regardless of type -- `'1'`
+  matches `=1` like `1`, `'0'` matches `=0` like `0`, and a `bigint` is
+  `Number()`-coerced (`2n` renders like `2`) so the raw `TypeError` is
+  unreachable. This is NOT a bare `Number()`: that maps `null -> 0` and
+  `'' -> 0`, which under an `=0` bucket would render the ZERO sentence for a
+  nullish count. `null` is not zero (suite law) and neither is `''`, so
+  `null`/`''`/`undefined` deliberately stay in the `other` path. On
+  `{n, plural, =0 {ZERO} one {ONE} other {MANY}}` pre-fix `'0'` rendered `MANY`
+  (bug) and `null` rendered `MANY`; post-fix `'0'` renders `ZERO` (fixed) and
+  `null` still renders `MANY` (law honored, NOT `ZERO`). Runs on every plural
+  render; Q2 ceilings unmoved (decisions/0004-count-coercion.md).
+- **I-07 (no cap): message nesting had no depth limit; a runaway template threw a
+  bare `RangeError` at define time.** Nested argument blocks compile through a
+  mutually-recursive tokenizer with nothing bounding it -- depth 5000 bottomed
+  out in `RangeError: Maximum call stack size exceeded`, naming no key, no
+  locale, no package. A dictionary built from a translation file can carry this.
+  Fixed: capped at compile time at `MAX_TEMPLATE_DEPTH` (32, far above any real
+  message and far below the stack) with a NAMED `MessageDepthError extends
+  SyntaxError` carrying the key and the depth reached. The parser throws at the
+  33rd level, before it can recurse to the stack limit. Depth 32 is accepted,
+  depth 33 is the first rejected. The staging Map leaves the dict byte-identical
+  after the throw -- asserted, not assumed (decisions/0005-depth-cap.md).
+- **I-05 (silent): `loadLocale` overwrote a later `defineMessages`, and the
+  promise resolved anyway.** A load in flight for `'fr'`, then a synchronous,
+  intentional `defineMessages('fr', ...)`, then the loader resolved -- and the
+  async writer silently won across the await boundary (`FROM DEFINE` before the
+  load resolved, `FROM LOAD` after). The promise RESOLVED; there was nothing to
+  observe, log or assert. This is precisely how a translation reverts in
+  production and nobody can reproduce it. Fixed: an explicit `defineMessages` for
+  a locale with a load in flight now WINS -- it marks the load superseded, the
+  success handler discards the load result (does NOT commit) and emits a named
+  `console.warn` so the LOSING writer is observable, and the promise RESOLVES
+  rather than rejects. Three orderings pinned: define-then-load (short-circuits,
+  no warn), load-then-define (superseded, one warn), both-in-flight
+  (decisions/0006-load-define-race.md).
+- **I-06 (docs vs code drift): the README denied nesting and undercounted the
+  token shapes.** `README.md` claimed "three token shapes" (the compiler emits
+  four -- `type: 3` is `select`) and "Sub-templates never contain nested
+  plurals", while `llms.txt` documented nesting as supported and the code allowed
+  it (`{a, select, x {{count, plural, one {1 thing} other {# things}}} other
+  {none}}` renders `3 things`). Fixed: README lists four token shapes including
+  Type 3 (select) and states nesting is supported; the nesting law is now pinned
+  by torture T0 assertions rather than by prose that already drifted for a
+  release. `llms.txt` and `I18n.d.ts` reconciled (the I-17 note that `bigint`
+  throws out of Intl is reversed -- it now coerces).
+
+### Notes
+
+No new API surface, no lint entry, no runtime dependency. `MessageDepthError` is
+exported (mirroring `LocaleCapacityError`) so callers can `instanceof` it;
+`bigint` returns to the published `MessageParams` union. Every regression is
+proven non-vacuous: reverting each guard in `I18n.js` turns the matching test red
+(reported in the session notes).
+
+### Size budget (moved deliberately)
+
+The `I18n.js` gzipped-SOURCE budget moved **13312 -> 15750 B** (`test/size.mjs`),
+measured with the gate's own method (`zlib` level 9):
+
+| | gzipped source | code only (comments stripped) |
+| --- | --- | --- |
+| v1.2.0 | 11718 B | 5410 B |
+| v1.2.1 | 13823 B | 5972 B |
+| growth | **+2105 B** | **+562 B** |
+
+Only **+562 B is code** -- `coerceCount` + `MAX_TEMPLATE_DEPTH` +
+`MessageDepthError` + the depth threading + the define/load supersession. The
+other **73% of the gzipped growth is docstrings**, which suite law mandates and
+which minify to zero shipped bytes; shrinking them to fit a source-bytes proxy
+would optimize the measurement, not the artifact (the I-10 pathology). So the
+budget moved instead: 15750 B is the measured 13823 + ~14% headroom (13.9%), the
+same proportional margin both the old 10240 and the v1.2.0 13312 held over their
+measurements. The metric's blind spot (I-20) is unchanged.
+
 ## 1.2.0 -- 2026-08-16 (bounded caches + eviction)
 
 Every per-locale structure was unbounded and nothing ever released one. The

@@ -243,15 +243,17 @@ test("torture: plural with 1e20 (very large number) works", () => {
     assert.equal(i.plural("m", 1e20), "many");
 });
 
-test("torture: plural with BigInt throws (spec) -- caller must convert", () => {
-    // Intl.PluralRules.select() is spec'd to take a Number; BigInt throws
-    // "Cannot convert a BigInt value to a number". This is not a lite-i18n
-    // failure but a language-level constraint the caller must respect.
+test("torture: plural with BigInt renders (I-08 v1.2.1) -- coerced, never throws", () => {
+    // Pre-1.2.1 Intl.PluralRules.select(bigint) threw an UNNAMED
+    // "Cannot convert a BigInt value to a number" out of Intl, mid-render, in
+    // production. I-08 normalizes the selector once (coerceCount) so a BigInt is
+    // Number()-coerced before it can reach Intl: `5n` renders exactly like `5`.
     const i = createI18n({ locale: "en" });
     i.defineMessages("en", { m: { one: "one", other: "many" } });
-    assert.throws(() => i.plural("m", 5n), /BigInt/i);
-    // Explicit conversion by the caller works.
-    assert.equal(i.plural("m", Number(5n)), "many");
+    assert.equal(i.plural("m", 5n), "many");
+    assert.equal(i.plural("m", 1n), "one");
+    // Identical to the explicit-conversion the caller used to have to write.
+    assert.equal(i.plural("m", 5n), i.plural("m", Number(5n)));
 });
 
 // ============================================================================
@@ -423,23 +425,25 @@ test("I-09 row: throwing toString propagates (slot only; n/a for selectors)", ()
     assert.throws(() => i.t("slot", { name: { toString() { throw new Error("boom toString"); } } }), /boom toString/);
 });
 
-test("I-09 row: own BigInt value -- slot renders, plural throws (I-17: type narrowed)", () => {
+test("I-09 row: own BigInt value -- slot renders, plural coerces (I-08 v1.2.1)", () => {
     const i = i09();
     // A bigint stringifies cleanly in a slot.
     assert.equal(i.t("slot", { name: 10n }), "Hi, 10");
-    // But Intl.PluralRules.select(bigint) throws. I-17 decision: NARROW the
-    // published MessageParams type to drop `bigint` rather than coerce at the
-    // selector (coercion is entangled with the out-of-scope I-08 =N/category
-    // split). Runtime keeps throwing; the declaration no longer promises bigint.
-    assert.throws(() => i.t("plu", { count: 1n }), /BigInt/i);
+    // I-08 (v1.2.1) resolved the =N/category entanglement that the I-17 decision
+    // was blocked on, so the selector now Number()-coerces a bigint before Intl
+    // sees it: `count: 1n` renders like `count: 1`, never throwing out of Intl.
+    assert.equal(i.t("plu", { count: 1n }), "1 item");
+    assert.equal(i.t("plu", { count: 1n }), i.t("plu", { count: 1 }));
 });
 
-test("I-09 row: string count '1' matches the category (pinned as-is, I-08 territory)", () => {
+test("I-09 row: string count '1' renders like number 1 (I-08 fixed v1.2.1)", () => {
     const i = i09();
-    // Intl coerces the string; the `=N` exact map (keyed by number) misses but
-    // rules.select('1') returns "one". This asymmetry is I-08 (out of scope);
-    // pinned here so the fix session inherits a falsifier, not a surprise.
+    // Since v1.2.1 coerceCount normalizes the selector ONCE, so the `=N` exact
+    // map (number-keyed) and rules.select() see the same value: '1' and 1 render
+    // identically. On this template ({count, plural, one/other}, no =1) both go
+    // to the `one` category -> "1 item".
     assert.equal(i.t("plu", { count: "1" }), "1 item");
+    assert.equal(i.t("plu", { count: "1" }), i.t("plu", { count: 1 }));
 });
 
 test("I-09 row: undefined/null/string/number/array params -> slot '', select `other`, plural `other`", () => {
