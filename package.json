@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-i18n",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Zero-GC reactive internationalization built on lite-signal. Pre-compiled ICU templates (plural, selectordinal, select, nested composition), cached Intl instances, CLDR plurals, fallback chains, ICU quoted-string escapes. ~3.5 KB min+gz core + ~0.76 KB format entry.",
   "type": "module",
   "main": "./I18n.js",
@@ -19,6 +19,12 @@
       "import": "./Format.js",
       "default": "./Format.js"
     },
+    "./lint": {
+      "types": "./Lint.d.ts",
+      "node": "./Lint.js",
+      "import": "./Lint.js",
+      "default": "./Lint.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -26,6 +32,8 @@
     "I18n.d.ts",
     "Format.js",
     "Format.d.ts",
+    "Lint.js",
+    "Lint.d.ts",
     "README.md",
     "llms.txt",
     "CHANGELOG.md",

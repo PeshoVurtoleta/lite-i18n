@@ -2,6 +2,55 @@
 
 All notable changes to `@zakkster/lite-i18n` are documented here.
 
+## 1.3.0 -- 2026-08-20 (the `/lint` entry)
+
+A parity checker can only enforce a law that has been written down, and I3
+(v1.2.1) is where the define-time law was written -- so `/lint` lands now. A
+linter is only worth shipping if it agrees with the runtime it lints: a check
+that passes a dict the runtime mis-renders is a green light over a hole.
+
+### Added
+
+- **`@zakkster/lite-i18n/lint` -- a build-time translation linter.** Four checks
+  that read a dict-set and return structured `Finding[]`
+  (`{ check, key, locale, kind, detail }`), none of which ever throws:
+  - **`extractSlots(message) -> string[]`** -- the shared primitive. RECURSIVE
+    through select/plural/selectordinal variants, so a plural variable nested
+    inside a select variant (`{g, select, male {He has {n, plural, ...}} ...}`)
+    is found; a top-level-only scan would miss `n` and pass a translation that
+    drops it. `#` adds no slot (it is the enclosing plural variable). Never
+    throws -- a malformed template yields whatever parsed before the break.
+  - **`checkParity(dicts, referenceLocale)`** -- per key, the recursive slot SET
+    must match the reference; reports `missing-slot` / `extra-slot` per locale.
+  - **`checkCoverage(dicts, referenceLocale)`** -- every reference key present in
+    every locale; reports `missing-key`.
+  - **`checkPluralCompleteness(dicts)`** -- per plural/selectordinal token, the
+    present CLDR keyword variants must cover
+    `Intl.PluralRules(locale, {type}).resolvedOptions().pluralCategories`,
+    consulting the SAME rules the runtime does: cardinal categories for `plural`,
+    ordinal for `selectordinal` (English ordinal needs one/two/few/other, not the
+    cardinal one/other); `=N` exact buckets are EXCLUDED from category coverage
+    (`=1` catches the literal number 1 only, while Russian `one` also covers
+    21/31/41, so an `=1`-but-no-`one` dict is flagged, not passed); an invalid
+    locale tag is caught and yields a `kind:"invalid-locale"` finding rather than
+    throwing a `RangeError` out of Intl.
+- The linter RE-PARSES ICU-lite in `Lint.js` rather than importing the compiler's
+  internal parser -- extracting the tokenizer into a shared module would move the
+  hot compile path I5 is sensitive to, for no runtime feature, and the grammar is
+  small and frozen after I3. The re-parse is bounded by a render-observation
+  parity gate (`extractSlots` must equal the slot set the compiler actually
+  honours on the fixture corpus), not by intent. See
+  `decisions/0007-lint-reparse.md`.
+- Nothing in the `.` graph imports `Lint.js` (asserted on the resolved module
+  graph), so importing the runtime ships zero linter bytes and the `.` entry did
+  not grow by a byte (`I18n.js` size budget unchanged). `Lint.js` ships behind
+  its own size budget (I-13). The `./lint` subpath is added to `exports`,
+  `files[]`, `llms.txt`, and `Lint.d.ts` declarations.
+
+No change to any runtime export or to the compiler's parse. `/lint` is a
+build-time entry with no path through `t()`/`plural()`; I0's five ceilings are
+unmoved and torture prints `ok`.
+
 ## 1.2.1 -- 2026-08-19 (define-time + dispatch-time law)
 
 Four define-time and dispatch-time questions had no written answer, so the same

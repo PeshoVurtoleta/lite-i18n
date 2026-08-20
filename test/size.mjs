@@ -54,9 +54,21 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 //   15750 = 13823 + ~14%   (v1.2.1, 13.9%)
 // The metric's own blind spot -- it taxes comment density and cannot see true
 // min+gz -- is filed as I-20 (roadmap S3, assigned I7) next to I-13/I-18.
+// Lint.js (v1.3.0, I4): the `./lint` entry ships behind its own budget so the
+// linter cannot grow unbounded (I-13 -- the suite gates EVERY shipped file). It
+// is a separate file; nothing in the `.` graph imports it (asserted on the
+// module graph in test/13-lint.test.mjs), so its budget is independent of
+// I18n.js's and adding it does NOT move I18n.js's number. Measured with THIS
+// file's method (zlib level 9): 5332 B at first draft, then 6172 B once the
+// checks were made hostile-input-proof (a cycle+depth guard on flattenDict plus
+// the malformed-dict finding path -- a never-throw correctness requirement, not
+// bloat). Budget set at ~14% headroom over the 6172 B measurement (7037 B), the
+// same proportional margin the I18n.js budget holds -- re-measure and move
+// deliberately if the linter grows.
 const BUDGETS = [
     { file: "I18n.js", gzBudget: 15750 },
     { file: "Format.js", gzBudget: 2560 },
+    { file: "Lint.js", gzBudget: 7037 },
 ];
 
 process.stdout.write(

@@ -17,7 +17,7 @@
 import { signal } from "@zakkster/lite-signal";
 
 // Four-place version sync: package.json, this const, I18n.d.ts and llms.txt move together.
-export const VERSION = "1.2.1";
+export const VERSION = "1.3.0";
 
 // Per-instance ceiling for every per-locale structure keyed on an untrusted
 // string (_readySignals, _pluralRules, _ordinalRules). Sized well under

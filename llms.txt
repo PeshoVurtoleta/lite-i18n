@@ -80,6 +80,21 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
   zero-alloc for hoisted opts; factory is zero-alloc unconditionally after
   the first call per locale.
 
+- **Linter** (`@zakkster/lite-i18n/lint`): a BUILD-TIME entry that reads a
+  dict-set and returns structured findings. Four checks, none of which ever
+  throws: `extractSlots(message)` (the shared primitive -- recursive through
+  select/plural/selectordinal variants), `checkParity(dicts, ref)` (per key, the
+  recursive slot SET must match the reference), `checkCoverage(dicts, ref)`
+  (every reference key present in every locale), `checkPluralCompleteness(dicts)`
+  (per plural/selectordinal token, the present CLDR keyword variants must cover
+  `Intl.PluralRules(locale, {type}).resolvedOptions().pluralCategories` --
+  cardinal for `plural`, ordinal for `selectordinal`; `=N` exact buckets are
+  excluded; an invalid locale tag yields a `kind:"invalid-locale"` finding, never
+  a throw). It re-parses ICU-lite rather than sharing the compiler's parser
+  (decisions/0007-lint-reparse.md); nothing in the `.` graph imports it, so the
+  runtime ships zero linter bytes. Not for a per-render path -- extractSlots
+  tokenizes and allocates on every call.
+
 ## Architecture invariants
 
 - **Compile once, reuse forever**: `defineMessages` walks the dict, flattens
@@ -139,6 +154,18 @@ Extensions, game HUDs, per-tenant SDKs, and SSR (one instance per request).
 
 ## Version notes
 
+- **1.3.0** (2026-08-20, the `/lint` entry). New `@zakkster/lite-i18n/lint`
+  subpath: four build-time checks that read a dict-set and return structured
+  findings, none ever throwing -- `extractSlots` (recursive through nested
+  variants), `checkParity`, `checkCoverage`, `checkPluralCompleteness`. The last
+  consults the same category rules the runtime does: cardinal for `plural`,
+  ordinal for `selectordinal`; `=N` exact buckets excluded from category coverage
+  (`=1` catches only the literal 1, while the `one` category also covers Russian
+  21/31/41); an invalid locale tag becomes a `kind:"invalid-locale"` finding.
+  The linter re-parses ICU-lite rather than importing the compiler's internal
+  parser, bounded by a render-observation parity gate (decisions/0007-lint-reparse.md).
+  Nothing in the `.` graph imports `Lint.js`, so the runtime entry did not grow
+  by a byte. No change to any runtime export or to the compiler's parse.
 - **1.2.1** (2026-08-19, define-time + dispatch-time law). Four define/dispatch
   questions that had no written answer, so the same value could render two
   sentences. I-08: the plural selector is now normalized ONCE (coerceCount)
@@ -389,6 +416,13 @@ function listFormat        (opts?, i18n?): (items)             => string;
 function relativeTimeFormat(opts?, i18n?): (v: number, unit)   => string;
 
 function createFormatters(i18n: I18n): BoundFormatters;  // all 8 bound to instance
+
+// Lint (@zakkster/lite-i18n/lint) -- build-time; every check returns Finding[], never throws
+// Finding = { check, key, locale, kind, detail }
+function extractSlots           (message: string): string[];                 // recursive slot set
+function checkParity            (dicts, referenceLocale: string): Finding[]; // slot SET must match reference
+function checkCoverage          (dicts, referenceLocale: string): Finding[]; // every ref key present per locale
+function checkPluralCompleteness(dicts): Finding[];                          // CLDR category coverage per token
 ```
 
 ## Message template DSL
@@ -569,7 +603,8 @@ The only unavoidable per-call allocation is the produced string.
 
 - `I18n.js` -- core: tokenizer, compiler, createI18n, top-level default-instance routing.
 - `Format.js` -- Intl formatters, factories, createFormatters bulk binder.
-- `I18n.d.ts` / `Format.d.ts` -- TypeScript declarations.
+- `Lint.js` -- build-time linter: extractSlots + checkParity/Coverage/PluralCompleteness (re-parses ICU-lite; not in the `.` graph).
+- `I18n.d.ts` / `Format.d.ts` / `Lint.d.ts` -- TypeScript declarations.
 - `test/01-core.test.mjs` -- static/interpolation, nested dicts, missing-key policies, isolation.
 - `test/02-plural.test.mjs` -- plural-object entries, inline ICU, exact matches, CLDR selectors across en/bg/pl/ar, selectordinal categories.
 - `test/03-fallback.test.mjs` -- chain walk order, epoch bump semantics, non-fallback locale doesn't re-fire effects.
